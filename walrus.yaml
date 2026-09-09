@@ -1,0 +1,59 @@
+# Shared local-development configuration for both Walrus services.
+# Environment variables override these values; `__` denotes nesting.
+version: 1
+
+common:
+  control_db_url: postgres://postgres:postgres@localhost:5433/walrus_control
+  object_store:
+    bucket: walrus
+    endpoint: http://localhost:9000
+    region: us-east-1
+  telemetry:
+    json: false
+    filter: info
+
+extractor:
+  source_db_url: postgres://postgres:postgres@localhost:5432/walrus
+  instance: walrus-extractor-dev
+  slot_name: walrus_slot
+  publication_name: walrus_pub
+  max_fill: 5s
+  heartbeat_idle_after: 10s
+  heartbeat_roundtrip_deadline: 30s
+  backfill_statement_timeout: 0s
+  max_rows: 100000
+  max_bytes: 134217728
+  max_inflight_bytes: 536870912
+  backpressure_activate_ratio: 0.85
+  backpressure_resume_ratio: 0.75
+  startup_deadline: 60s
+  health_addr: 127.0.0.1:8088
+  max_concurrent_reloads: 2
+  reload_workers_per_table: 4
+  reload_lease_ttl: 60s
+  reload_chunk_rows: 10000
+  reload_echo_timeout: 30s
+  reload_max_restarts: 3
+  manage_publication: false
+  strict_keys: true
+
+transformer:
+  instance: walrus-transformer-0
+  ducklake:
+    catalog_url: postgres://postgres:postgres@localhost:5433/walrus_ducklake
+    attach_name: walrus
+    metadata_schema: walrus_ducklake
+    data_path: s3://walrus/ducklake/dev/
+    install_extensions: true
+    snapshot_retention: 7d
+    cleanup_grace: 7d
+    maintenance_interval: 24h
+  shard_count: 1
+  lease_ttl: 30s
+  poll_interval: 5s
+  compaction_interval: 3600s
+  retention_lsn_lag: 16777216
+  max_files_per_cycle: 32
+  max_integrity_resnapshots: 1
+  startup_deadline: 60s
+  health_addr: 127.0.0.1:8090

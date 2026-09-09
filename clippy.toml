@@ -1,0 +1,30 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+enum-variant-size-threshold = 64
+
+# Blocking file I/O has no place in an async function: `tokio::fs` runs the same operation on the
+# blocking pool instead of parking an executor thread. Directory setup/teardown is deliberately
+# omitted because workspace integration tests use it synchronously for temporary fixtures.
+disallowed-methods = [
+  { path = "std::fs::read", reason = "blocking in async; use tokio::fs::read" },
+  { path = "std::fs::read_to_string", reason = "blocking in async; use tokio::fs::read_to_string" },
+  { path = "std::fs::write", reason = "blocking in async; use tokio::fs::write" },
+  { path = "std::fs::remove_file", reason = "blocking in async; use tokio::fs::remove_file" },
+  { path = "std::fs::File::open", reason = "blocking in async; use tokio::fs::File::open" },
+  { path = "std::fs::File::create", reason = "blocking in async; use tokio::fs::File::create" },
+  { path = "std::sync::mpsc::channel", reason = "its recv() parks the executor thread; both binaries are fully async — use tokio::sync::mpsc::channel(N)" },
+  { path = "std::sync::mpsc::sync_channel", reason = "its send()/recv() park the executor thread; both binaries are fully async — use tokio::sync::mpsc::channel(N)" },
+  { path = "tokio::sync::mpsc::unbounded_channel", reason = "use mpsc::channel(N) with an explicit capacity and full-channel policy" },
+  { path = "tokio::sync::broadcast::channel", reason = "no multi-consumer event stream exists; use mpsc for work queues or watch for latest-state delivery" },
+]
+
+# `await_holding_lock` knows `std::sync` and `parking_lot` guards; it does not know `watch::Ref`,
+# which IS a read guard on the channel's inner lock. The transformer's apply loop borrows the epoch watch
+# inside an `async fn`, so a `Ref` retained across an `.await` would block every `Sender::send` — the
+# same starvation `await_holding_lock` exists to stop. The loop already copies the `EpochNo` out in
+# the borrowing statement; this list is what gives the `await_holding_invalid_type` deny (Cargo.toml)
+# something to enforce, so a later edit cannot quietly widen that scope.
+await-holding-invalid-types = [
+  { path = "tokio::sync::watch::Ref", reason = "a read guard on the watch value; copy the value out of the borrow before awaiting" },
+]

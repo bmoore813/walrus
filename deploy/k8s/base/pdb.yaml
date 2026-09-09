@@ -1,0 +1,32 @@
+# PodDisruptionBudgets — maxUnavailable: 1, NEVER minAvailable: 1.
+#
+# On a single-replica workload `minAvailable: 1` makes the pod UNEVICTABLE: `kubectl drain` and node
+# upgrades then hang forever — the exact opposite of the "self-healing through node drain" goal. The
+# system already survives pod churn via durable checkpoints + fail-fast bootstrap, so voluntary
+# disruption of the one pod must stay allowed. `maxUnavailable: 1` permits it; omitting the PDB entirely
+# would be equivalent (these exist mainly to document the rule and guard against a well-meaning
+# `minAvailable` edit).
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: walrus-extractor
+  labels:
+    app.kubernetes.io/name: walrus-extractor
+spec:
+  maxUnavailable: 1 # NEVER minAvailable: 1 — it would block kubectl drain on this single replica
+  selector:
+    matchLabels:
+      app: walrus-extractor
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: walrus-transformer
+  labels:
+    app.kubernetes.io/name: walrus-transformer
+spec:
+  maxUnavailable: 1 # NEVER minAvailable: 1
+  selector:
+    matchLabels:
+      app: walrus-transformer

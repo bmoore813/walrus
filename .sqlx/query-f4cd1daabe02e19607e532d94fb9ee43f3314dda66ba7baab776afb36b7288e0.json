@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT MAX(work_lsn) AS \"max_lsn_end: Lsn\"\nFROM (\n  SELECT lsn_end AS work_lsn\n  FROM public.walrus_file_manifest\n  WHERE epoch = $1 AND source_schema = $2 AND source_table = $3 AND status = 'ready'\n  UNION ALL\n  SELECT commit_lsn\n  FROM public.walrus_stream_manifest_group\n  WHERE epoch = $1 AND source_schema = $2 AND source_table = $3\n    AND status = 'ready'\n) AS ready_work\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max_lsn_end: Lsn",
+        "type_info": {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f4cd1daabe02e19607e532d94fb9ee43f3314dda66ba7baab776afb36b7288e0"
+}

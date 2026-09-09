@@ -1,0 +1,809 @@
+name: CI
+
+# Every pull request and main push runs the repository's baseline gates. The retained roadmap job is
+# a stable branch-protection interface; it exits successfully now that the completed roadmap has
+# been removed, and will reactivate its validator if the roadmap is restored. A separate
+# `changes` job classifies the diff so a docs-only commit skips the compile-heavy jobs
+# (static / clippy / unit / integration / conformance / images / compose); the ungated jobs
+# (supply-chain, msrv, manifests) are seconds each and always run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One in-flight run per PR (or main/manual ref); a new revision cancels the previous run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Snapshots are reviewed artifacts: CI must never accept or rewrite changed renderer output.
+  INSTA_UPDATE: "no"
+
+jobs:
+  roadmap:
+    name: implementation roadmap contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate roadmap index and task contracts
+        run: |
+          # The implementation roadmap was retired from the repository after completion. Keep this
+          # named check as a stable branch-protection/automation interface, and reactivate the full
+          # validator automatically if the roadmap is restored.
+          if [ ! -f docs/implementation/README.md ]; then
+            echo "Implementation roadmap is not present; nothing to validate."
+            exit 0
+          fi
+          # A half-landed bookkeeping edit must fail on every PR/branch. The one
+          # recovery exception is the push run on main itself: allowing exit 5
+          # there lets preflight prove DRIFT and open the docs-only reconcile PR.
+          # Structural/coverage/readiness errors (exit 4) always remain red.
+          if python3 .claude/skills/implementing-walrus-roadmap/scripts/next_task.py \
+              --validate-all --require-tracked; then
+            exit 0
+          else
+            rc=$?
+          fi
+          if [ "$rc" -eq 5 ] && [ "$GITHUB_EVENT_NAME" = push ] \
+              && [ "$GITHUB_REF" = refs/heads/main ]; then
+            echo "Validated state drift on main; reconciliation is the only permitted next action."
+            exit 0
+          fi
+          exit "$rc"
+
+  # A cheap classifier (runs in seconds) so a docs-only change can skip the compile-heavy jobs. It
+  # emits `code: true` when the diff touches anything that can affect a build/test/image, and
+  # `code: false` for pure docs (docs/**, *.md, LICENSE). The heavy jobs gate on this output; an
+  # `if:`-skipped job reports success, so required checks stay satisfied — unlike a workflow-level
+  # `paths:` filter, which reports *nothing* on a filtered run and would wedge branch protection.
+  changes:
+    name: changes (classify diff)
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+    steps:
+      # paths-filter needs the tree on a bare `push` (it diffs against the push's before-SHA); on
+      # `pull_request` it diffs against the base branch automatically. Checkout must come first.
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'tests/**'
+              - 'migrations/**'
+              - 'deploy/**'
+              - 'scripts/**'
+              - 'Cargo.*'
+              - 'rust-toolchain.toml'
+              - 'justfile'
+              - 'deny.toml'
+              - '.github/**'
+
+      # Manual runs are explicitly full runs; push/PR runs retain the path filter's classification.
+      - name: Resolve CI scope
+        id: scope
+        env:
+          FILTER_CODE: ${{ steps.filter.outputs.code }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$FILTER_CODE" = true ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Repository-shape and formatting checks have no reason to wait behind DuckDB compilation. Keep
+  # them isolated so cheap failures return immediately while clippy and tests compile in parallel.
+  static:
+    name: static (guards · fmt)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lock-choice guard
+        run: bash scripts/check-lock-choice.sh
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - name: Unsafe invariants (scripts/check-unsafe-invariants.sh)
+        run: bash scripts/check-unsafe-invariants.sh
+
+      - name: Performance report helper tests
+        run: python3 -m unittest scripts/test_perf_report.py
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+      - name: guard — macro fragment specifiers (no untyped `:tt` capture)
+        run: bash scripts/check-macro-fragment-specifiers.sh --check
+
+      - name: No OS threads in production sources
+        run: bash scripts/check-no-os-threads.sh
+
+      - name: Test-module hygiene
+        run: bash scripts/test-hygiene.sh --check
+
+      - name: Module documentation
+        run: bash scripts/check-module-docs.sh --check
+
+  # Clippy and unit tests use different Cargo profiles/configurations. Separate runners turn the old
+  # serial critical path into max(clippy, test), while sccache continues sharing compiler outputs.
+  clippy:
+    name: clippy (all targets · all features)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      CC: sccache cc
+      CXX: sccache c++
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+      # `--all-features` compile-checks the diagnostic tokio-console layer. Tokio exposes the task
+      # instrumentation it consumes behind this cfg; default/release artifacts never enable it.
+      RUSTFLAGS: "--cfg tokio_unstable"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk-space
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy-all-features
+          cache-on-failure: true
+
+      - name: Start workload timer
+        run: echo "CI_TIMED_WORK_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: sccache and timing summary
+        if: always()
+        run: bash .github/scripts/sccache-summary.sh clippy
+
+  unit:
+    name: unit (workspace · common feature seam)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      CC: sccache cc
+      CXX: sccache c++
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk-space
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-workspace
+          cache-on-failure: true
+
+      - name: Start workload timer
+        run: echo "CI_TIMED_WORK_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      # The ONLY build in which `common` is isolated with its optional `sqlx` feature off.
+      # Workspace feature unification turns it on through `control`, while `--all-features` does
+      # so directly. Package isolation is what exercises the off state; disabling defaults states
+      # the intent and preserves it if `common` gains default features later.
+      - name: common feature seam (sqlx off)
+        run: cargo check -p common --no-default-features --all-targets
+
+      - name: sccache and timing summary
+        if: always()
+        run: bash .github/scripts/sccache-summary.sh unit
+
+  compose:
+    name: compose (source-pg · control-pg · minio)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `up --wait` is the deterministic gate: it blocks until all three services are healthy and
+      # the createbucket one-shot has completed. GitHub's ubuntu runners ship Docker + Compose v2.
+      - name: Boot the dev stack (up --wait)
+        run: docker compose -f deploy/docker/docker-compose.yml up --wait
+
+      - name: Show service state
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml ps -a
+
+      - name: Smoke — services reachable, seeded, and bucket present
+        run: |
+          set -euo pipefail
+          C="docker compose -f deploy/docker/docker-compose.yml"
+          # Both Postgres instances accept connections (checked inside the containers).
+          $C exec -T source-pg pg_isready -U postgres -d walrus
+          $C exec -T control-pg pg_isready -U postgres -d walrus_control
+          # MinIO health on the published port.
+          curl -sf http://localhost:9000/minio/health/live
+          # Source PG came up with wal_level=logical.
+          wal_level=$($C exec -T source-pg psql -U postgres -d walrus -tAc "SHOW wal_level")
+          echo "wal_level=$wal_level"; test "$wal_level" = "logical"
+          # Publication covers >= 3 tables (orders / customers / items).
+          count=$($C exec -T source-pg psql -U postgres -d walrus -tAc "SELECT count(*) FROM pg_publication_tables")
+          echo "pg_publication_tables=$count"; test "$count" -ge 3
+          # The walrus bucket exists (createbucket sidecar created it and is healthy).
+          $C exec -T createbucket mc ls local/walrus
+
+      - name: Tear down (remove volumes)
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml down -v
+
+  integration-core:
+    name: integration (control · SQLx · extractor)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # Both point at the compose control-pg (host port 5433). WALRUS_CONTROL_DB_URL drives the
+      # integration test; DATABASE_URL is what `sqlx prepare` connects to.
+      WALRUS_CONTROL_DB_URL: postgres://postgres:postgres@localhost:5433/walrus_control
+      DATABASE_URL: postgres://postgres:postgres@localhost:5433/walrus_control
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-core-extractor
+          cache-on-failure: true
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Boot the dev stack (up --wait)
+        run: docker compose -f deploy/docker/docker-compose.yml up --wait
+
+      # Apply the control schema before compiling: with DATABASE_URL set, sqlx's query! macros
+      # introspect the live DB at *compile* time, so the tables must exist first (the tests also
+      # re-run migrations idempotently at runtime). This also gives `sqlx prepare --check` a schema.
+      - name: Apply control migrations
+        run: sqlx migrate run --source migrations/control
+
+      - name: Start workload timer
+        run: echo "CI_TIMED_WORK_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Control integration tests (migrations schema/CHECK + file_manifest claim order)
+        run: cargo test -p control --features integration
+
+      # The type-descriptor round-trip is #[ignore]-gated (it dev-deps pg-to-arrow); run it explicitly
+      # against the live control PG. Reuses the --features integration build from the step above.
+      - name: schema_registry TypeDescriptor round-trip
+        run: cargo test -p control --features integration -- --ignored schema_registry_roundtrips_a_type_descriptor
+
+      - name: sqlx offline cache is up to date (cargo sqlx prepare --check)
+        run: cargo sqlx prepare --check --workspace
+
+      # source-side preflight over the live source PG (good source passes; control-pg's
+      # wal_level=replica is terminal; keyless table; publication gap).
+      - name: Source preflight (compose)
+        run: cargo test -p extractor --test preflight -- --ignored
+
+      # the START_REPLICATION transport spike — a source write yields an XLogData frame, and
+      # standby-status keepalive feedback keeps the connection alive past wal_sender_timeout (5s).
+      - name: Replication spike (compose)
+        run: cargo test -p extractor --test replication_spike -- --ignored
+
+      # live pgoutput decode — an INSERT decodes to Begin/Relation/Insert/Commit.
+      - name: Live decode (compose)
+        run: cargo test -p extractor --test live_decode -- --ignored
+
+      # relation cache → schema_registry round-trip (first Relation writes a row; hydrate).
+      - name: Relation cache (compose)
+        run: cargo test -p extractor --test relation_cache -- --ignored
+
+      # micro-batching — a stream of inserts forms and seals a batch.
+      - name: Batching (compose)
+        run: cargo test -p extractor --test batching -- --ignored
+
+      # Arrow → Parquet → S3 PUT — object lands at the epoch key and reads back (MinIO).
+      - name: Parquet S3 PUT (compose)
+        run: cargo test -p extractor --test parquet_put -- --ignored
+
+      # manifest INSERT — object + ready row both exist; lsn_end == commit LSN.
+      - name: Manifest insert (compose)
+        run: cargo test -p extractor --test manifest_insert -- --ignored
+
+      # durability checkpoint — confirmed_flush_lsn advances to a batch's lsn_end only after
+      # the S3 PUT + manifest commit; a crash before the standby update re-streams (at-least-once).
+      - name: Durability checkpoint (compose)
+        run: cargo test -p extractor --test durability -- --ignored --test-threads=1
+
+      # idle heartbeat — an idle publication beats after idle_after, the beat_seq returns
+      # through the stream, confirmed_flush_lsn advances, and the beat is never staged to a manifest.
+      - name: Heartbeat liveness (compose)
+        run: cargo test -p extractor --test heartbeat_liveness -- --ignored --test-threads=1
+
+      # graceful drain — SIGTERM flushes the in-flight committed batch + manifest, advances
+      # confirmed_flush via a final standby update, sends CopyDone, never drops the slot, and resumes.
+      - name: Graceful shutdown drain (compose)
+        run: cargo test -p extractor --test graceful_shutdown -- --ignored --test-threads=1
+
+      # large-txn streaming — an 8000-row txn (logical_decoding_work_mem=64kB) writes ready
+      # rows only after Stream Commit; a whole-txn abort writes none.
+      - name: Streaming large txn (compose)
+        run: cargo test -p extractor --test streaming_large_txn -- --ignored --test-threads=1
+
+      # the flagship — a rolled-back savepoint inside a committing streamed txn (proto §9b)
+      # yields a ready file with EXACTLY 6000 rows; the rolled-back sub-xid's rows are never present.
+      - name: Sub-transaction exclusion (compose)
+        run: cargo test -p extractor --test subtransaction_exclusion -- --ignored --test-threads=1
+
+      # aggregate max_inflight_bytes — a large open txn under a low ceiling spills
+      # speculatively (spill_count increments), memory stays bounded, and the slot is never advanced.
+      - name: Max inflight bytes (compose)
+        run: cargo test -p extractor --test max_inflight_bytes -- --ignored --test-threads=1
+
+      # DDL capture — an ALTER ADD COLUMN writes a ddl_manifest row (c_lsn), bumps the
+      # structural schema_version + cuts a fresh file; a COMMENT is metadata-only; internal never staged.
+      - name: DDL capture (compose)
+        run: cargo test -p extractor --test ddl_capture -- --ignored --test-threads=1
+
+      # the reload signal table — a signal INSERT is decode-visible through the slot
+      # (wal_insert_lsn stamped by the DEFAULT), source catalog enumeration excludes it from
+      # reconciliation targets, and preflight is terminal on a missing/unpublished table (or heals
+      # the gap under manage_publication).
+      - name: Reload signal (compose)
+        run: cargo test -p extractor --test reload_signal -- --ignored --test-threads=1
+
+      # echo routing — a manual reload_signal INSERT resolves a subscribed watermark waiter
+      # with the txn's COMMIT LSN (embedded < commit cross-check holds) and never reaches a
+      # batcher / Parquet file / manifest row.
+      - name: Reload echo (compose)
+        run: cargo test -p extractor --test reload_echo -- --ignored --test-threads=1
+
+      # the reload controller — pickup flips requested → exporting with a live, advancing
+      # lease; unpublished/keyless/resync requests fail fast with reasons; cap=2 holds under three
+      # requests while the stream keeps flowing.
+      - name: Reload pickup (compose)
+        run: cargo test -p extractor --test reload_pickup -- --ignored --test-threads=1
+
+      # the chunk export engine — 2,500 rows at chunk_rows=1000 ⇒ exactly 3 kind='reload'
+      # files whose union is the table, all stamped at one baseline F; a lost connection-local
+      # snapshot purges its cursor and re-exports, while a missing F echo fails before table reads.
+      - name: Reload export (compose)
+        run: cargo test -p extractor --test reload_export -- --ignored --test-threads=1
+
+      # restart-on-DDL — an ALTER between chunks trips the staleness check ⇒ old attempt
+      # failed + chunk files purged + a successor exporting at restart_count=1 re-exporting at the
+      # new schema; a cap of 0 fails the reload outright, no successor, both metrics move.
+      - name: Reload DDL restart (compose)
+        run: cargo test -p extractor --test reload_ddl -- --ignored --test-threads=1
+
+      # completion & crash recovery — a dropped mid-export snapshot starts a fresh successor,
+      # an attempt already fenced at H is resumed without exporting post-H rows, and the transformer
+      # completes only at H; a live foreign lease is never stolen, an expired one is.
+      - name: Reload recovery (compose)
+        run: cargo test -p extractor --test reload_recovery -- --ignored --test-threads=1
+
+      # reload observability — the chunk/row/echo metrics MOVE during an export, the failed
+      # counter ticks on an echo timeout, and the active gauge rises to 1 then returns to 0.
+      - name: Reload metrics (compose)
+        run: cargo test -p extractor --test reload_metrics -- --ignored --test-threads=1
+
+      # the extractor pod-lifecycle shell against the live stack — full bootstrap (control +
+      # S3 + source preflight) → /startup→/ready flip, SIGTERM exit 0, missing control DB → exit 11.
+      - name: Extractor pod-lifecycle smoke (health · SIGTERM · fail-fast exit code)
+        run: bash scripts/extractor-smoke.sh
+
+      - name: sccache and timing summary
+        if: always()
+        run: bash .github/scripts/sccache-summary.sh integration-core
+
+      - name: Tear down (remove volumes)
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml down -v
+
+  # Transformer integration owns a separate Compose stack, so its DuckDB compile and stateful fixtures
+  # run in parallel with the control/extractor family without sharing epochs, leases, or database rows.
+  integration-transformer:
+    name: integration (transformer)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      WALRUS_CONTROL_DB_URL: postgres://postgres:postgres@localhost:5433/walrus_control
+      DATABASE_URL: postgres://postgres:postgres@localhost:5433/walrus_control
+      RUSTC_WRAPPER: sccache
+      CC: sccache cc
+      CXX: sccache c++
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/free-disk-space
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-transformer
+          cache-on-failure: true
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Boot the dev stack (up --wait)
+        run: docker compose -f deploy/docker/docker-compose.yml up --wait
+
+      - name: Apply control migrations
+        run: sqlx migrate run --source migrations/control
+
+      # Ordinary transformer startup deliberately disables DuckLake's automatic metadata migrations.
+      # Exercise the same explicit pre-deploy command operators/Kubernetes run before any transformer
+      # can attach to the shared catalog.
+      - name: Migrate DuckLake catalog
+        env:
+          WALRUS_CONFIG: walrus.yaml
+          WALRUS_INSTANCE: ci-ducklake-migrator
+          WALRUS_OBJECT_STORE__BUCKET: walrus
+          WALRUS_OBJECT_STORE__ENDPOINT: http://localhost:9000
+          WALRUS_OBJECT_STORE__REGION: us-east-1
+          WALRUS_DUCKLAKE__CATALOG_URL: postgres://postgres:postgres@localhost:5433/walrus_ducklake
+          WALRUS_DUCKLAKE__DATA_PATH: s3://walrus/ducklake/tests/
+          WALRUS_DUCKLAKE__INSTALL_EXTENSIONS: "true"
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+        run: cargo run -p transformer --bin walrus-transformer -- --migrate-ducklake-catalog
+
+      - name: Start workload timer
+        run: echo "CI_TIMED_WORK_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      # Preserve the existing serial order: these targets derive epochs and ownership state from the
+      # shared control database in this job.
+      - name: Reload rebuild (compose)
+        run: cargo test -p transformer --test reload_rebuild -- --ignored --test-threads=1
+
+      - name: Reload resync (compose)
+        run: cargo test -p transformer --test reload_resync -- --ignored --test-threads=1
+
+      - name: Transformer bootstrap (compose)
+        run: cargo test -p transformer --test bootstrap -- --ignored --test-threads=1
+
+      - name: DuckLake catalog contract (compose)
+        run: cargo test -p transformer --test ducklake -- --ignored --test-threads=1
+
+      - name: Transformer Phase A (compose)
+        run: cargo test -p transformer --test phase_a -- --ignored --test-threads=1
+
+      - name: Transformer Phase B (compose)
+        run: cargo test -p transformer --test phase_b -- --ignored --test-threads=1
+
+      - name: Transformer DDL additive (compose)
+        run: cargo test -p transformer --test ddl_additive -- --ignored --test-threads=1
+
+      - name: Transformer DDL destructive (compose)
+        run: cargo test -p transformer --test ddl_destructive -- --ignored --test-threads=1
+
+      - name: Transformer snapshot boundary (compose)
+        run: cargo test -p transformer --test snapshot_boundary -- --ignored --test-threads=1
+
+      - name: Transformer compaction reclaim (real file)
+        run: cargo test -p transformer --test compaction -- --ignored --test-threads=1
+
+      - name: Transformer graceful shutdown (compose)
+        run: cargo test -p transformer --test shutdown -- --ignored --test-threads=1
+
+      - name: sccache and timing summary
+        if: always()
+        run: bash .github/scripts/sccache-summary.sh integration-transformer
+
+      - name: Tear down (remove volumes)
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml down -v
+
+  e2e_matrix:
+    name: e2e (${{ matrix.test }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - reload_quarantine
+          - reload_scale
+          - ddl_transactions
+          - source_reload_event
+          - total_restart
+          - wide_primary_key
+          - mirror_parity
+    # A DEDICATED job: the e2e harness spawns the real extractor+transformer binaries — its
+    # `build_bins` compiles the bundled DuckDB in the DEV profile ON TOP of the test-profile builds,
+    # which overflowed the integration runner's disk ("No space left on device"). A fresh runner with
+    # only the e2e crate's builds stays under the ceiling.
+    env:
+      # The harness defaults to the Compose URLs and must NOT set WALRUS_SOURCE_DB_URL — the transformer's
+      # strict figment config rejects the unknown field. The isolated acceptance runner overrides
+      # harness-specific WALRUS_E2E_* endpoints instead. sqlx query! macros compile against the
+      # committed .sqlx offline cache (no live DB needed at compile time).
+      SQLX_OFFLINE: "true"
+      RUSTC_WRAPPER: sccache
+      CC: sccache cc
+      CXX: sccache c++
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      # This job also cold-builds the bundled DuckDB (twice — test + dev profile). Reclaim headroom.
+      - uses: ./.github/actions/free-disk-space
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: e2e-${{ matrix.test }}
+          cache-on-failure: true
+
+      - name: Boot the dev stack (up --wait)
+        run: docker compose -f deploy/docker/docker-compose.yml up --wait
+
+      - name: Start workload timer
+        run: echo "CI_TIMED_WORK_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      # Every matrix runner has its own Compose stack, ports, databases, bucket, target directory,
+      # and child processes, so the stateful harnesses can execute concurrently without collisions.
+      - name: ${{ matrix.test }} (e2e)
+        run: |
+          cargo test -p e2e --features it \
+            --test "${{ matrix.test }}" \
+            -- --ignored --test-threads=1
+
+      - name: sccache and timing summary
+        if: always()
+        run: bash .github/scripts/sccache-summary.sh "e2e-${{ matrix.test }}"
+
+      - name: Tear down (remove volumes)
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml down -v
+
+  # Preserve the pre-matrix check name as a stable branch-protection interface. `result` is the
+  # aggregate result of every expanded matrix child, so this succeeds only when all seven pass.
+  e2e:
+    name: e2e (full pipeline — reload + transactional DDL)
+    needs: [changes, e2e_matrix]
+    if: always() && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every e2e matrix target
+        env:
+          E2E_MATRIX_RESULT: ${{ needs.e2e_matrix.result }}
+        run: |
+          if [ "$E2E_MATRIX_RESULT" != success ]; then
+            echo "::error::one or more e2e matrix jobs ended with: $E2E_MATRIX_RESULT"
+            exit 1
+          fi
+
+  conformance:
+    name: conformance (DuckDB read-back)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # sccache: cache rustc + the DuckDB C++ objects across jobs/profiles/Cargo.lock.
+      RUSTC_WRAPPER: sccache
+      CC: sccache cc
+      CXX: sccache c++
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      # sccache caches the individual DuckDB C++ objects; Swatinem still caches the registry + the
+      # finished target dir so a fully-warm run rebuilds nothing (the two layers are complements).
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: conformance
+          cache-on-failure: true
+
+      - name: Start workload timer
+        run: echo "CI_TIMED_WORK_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Conformance tests (write Parquet -> DuckDB read_parquet -> assert typeof + value)
+        run: cargo test -p pg-to-arrow --features conformance
+
+      - name: sccache and timing summary
+        if: always()
+        run: bash .github/scripts/sccache-summary.sh conformance
+
+  # supply-chain gate. `cargo deny check` runs all four families (advisories / licenses /
+  # bans / sources) against Cargo.lock — no crate compilation, so this job is fast and needs no
+  # DuckDB build. cargo-deny is pinned to an exact version (matching the one deny.toml was authored
+  # against) so a new release can't silently change the gate; new RUSTSEC advisories still surface,
+  # which is the point of the advisories check.
+  supply-chain:
+    name: supply-chain (cargo-deny · advisories · licenses · bans · sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      # walrus authors no proc-macros. Three workspace-shape invariants: no direct
+      # syn/quote/proc-macro2 dependency, no proc-macro member, and exactly seven workspace packages.
+      - name: No proc-macro toolchain (direct deps · proc-macro crate · member count)
+        run: bash scripts/proc-macro-guard.sh --check
+
+      # Keep unmeasured container, hasher, and global-allocator substitutions out of member
+      # manifests. Their transitive presence in Cargo.lock is fine and expected (ahash already
+      # arrives through arrow).
+      - name: No speculative allocator/container/hasher deps
+        run: bash scripts/no-speculative-deps.sh
+
+  # MSRV drift guard. walrus pins one exact stable in rust-toolchain.toml and every job above
+  # builds + tests on it, so CI already builds on the MSRV — this job's role is to fail fast if the
+  # declared MSRV (Cargo.toml [workspace.package].rust-version) and the pinned toolchain channel ever
+  # diverge, turning a toolchain drift into an explicit CI failure instead of a mystery build break.
+  # Cheap: string comparison only, no toolchain install or compile.
+  msrv:
+    name: MSRV (declared rust-version == pinned toolchain)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Declared MSRV matches the pinned toolchain
+        run: |
+          set -euo pipefail
+          declared=$(sed -nE 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+)".*/\1/p' Cargo.toml | head -1)
+          pinned=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([0-9]+\.[0-9]+).*/\1/p' rust-toolchain.toml | head -1)
+          echo "declared MSRV  (Cargo.toml)          = ${declared:-<none>}"
+          echo "pinned channel (rust-toolchain.toml) = ${pinned:-<none>}"
+          if [ -z "$declared" ] || [ -z "$pinned" ]; then
+            echo "::error::could not parse the MSRV / toolchain version"; exit 1
+          fi
+          if [ "$declared" != "$pinned" ]; then
+            echo "::error::MSRV drift — Cargo.toml rust-version ($declared) != rust-toolchain.toml channel ($pinned); keep them in sync."
+            exit 1
+          fi
+          echo "ok: the gates/integration/conformance jobs build on this exact toolchain, i.e. on the MSRV ($declared)."
+
+  # container images. Build both multi-stage Dockerfiles, then run the PID-1 SIGTERM smoke
+  # (scripts/image-smoke.sh): boot compose, drive the extractor to `streaming` and the transformer to its apply
+  # loops, SIGTERM each, and assert a graceful exit 0 (not 137/SIGKILL). The transformer image cold-builds
+  # the bundled DuckDB C++, so this job is slow like the other DuckDB jobs.
+  images:
+    name: images (build + PID-1 SIGTERM smoke)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both images (esp. the transformer's bundled-DuckDB build) are large; reclaim runner disk headroom.
+      - uses: ./.github/actions/free-disk-space
+
+      # Build via Buildx Bake with the GHA layer cache. The Dockerfiles use cargo-chef, whose `cook`
+      # layer (all deps incl. the bundled-DuckDB C++ build) is keyed on dependency metadata and
+      # deployable target topology. `.dockerignore` removes integration/e2e target directories, so
+      # adding a test cannot invalidate that layer and recompile DuckDB. `mode=max` is essential — it
+      # caches the intermediate builder/cook layers, not just the final runtime stage.
+      # (Cache MOUNTS were tried first and dropped: cargo's mtime fingerprinting re-runs the DuckDB
+      # build script after a cache tar-restore, so the C++ build repeated regardless — chef sidesteps
+      # that by using the content-hashed Docker layer cache.)
+      - uses: docker/setup-buildx-action@v3
+        id: buildx
+
+      # A single Bake group schedules both image targets concurrently. Path context is explicit so
+      # this checked-out workflow revision (including Dockerfile edits) is always the build input.
+      - name: Build both images concurrently
+        uses: docker/bake-action@v6
+        with:
+          source: .
+          files: deploy/docker/docker-bake.ci.hcl
+          targets: default
+          load: true
+
+      - name: PID-1 SIGTERM smoke (both images handle SIGTERM → exit 0, not SIGKILL)
+        run: bash scripts/image-smoke.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs walrus-extractor-smoke 2>&1 | tail -60 || true
+          docker logs walrus-transformer-smoke 2>&1 | tail -60 || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker/docker-compose.yml down -v || true
+
+  # Kubernetes manifests. Render the kustomize base (LoadRestrictionsNone — the slot-init
+  # ConfigMap is generated from the real migrations/source/*.sql outside base/) and schema-validate every
+  # resource with kubeconform in strict mode against a pinned API version. Fast, no cluster required.
+  manifests:
+    name: manifests (kustomize + kubeconform)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize + kubeconform (pinned)
+        run: |
+          KUSTOMIZE_VERSION=v5.4.3
+          KUBECONFORM_VERSION=v0.6.7
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kustomize
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 2 "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+          kustomize version
+          kubeconform -v
+
+      - name: Validate manifests (kustomize render → kubeconform strict)
+        run: bash scripts/k8s-validate.sh

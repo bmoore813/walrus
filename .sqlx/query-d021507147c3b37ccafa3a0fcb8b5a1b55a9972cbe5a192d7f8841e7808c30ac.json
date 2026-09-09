@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.walrus_transformer_checkpoint\n    (epoch, source_schema, source_table, raw_appended_lsn, transformed_lsn)\nVALUES ($1, $2, $3, '0/0'::pg_lsn, '0/0'::pg_lsn)\nON CONFLICT (epoch, source_schema, source_table) DO NOTHING\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d021507147c3b37ccafa3a0fcb8b5a1b55a9972cbe5a192d7f8841e7808c30ac"
+}

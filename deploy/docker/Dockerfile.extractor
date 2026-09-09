@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage image for the `walrus-extractor` binary, with cargo-chef dependency-layer caching.
+# cargo-chef splits the dependency build into a `cook` layer keyed only on the workspace's Cargo
+# metadata and deployable target topology, so a production source-only change reuses it from the GHA
+# layer cache (`type=gha,mode=max`) and recompiles just the workspace crates. `.dockerignore` keeps
+# test-only target discovery out of that topology.
+#
+# builder  — compile the release binary against the pinned MSRV toolchain (1.96.0, matching
+#            rust-toolchain.toml so rustup never re-downloads). sqlx runs OFFLINE against the
+#            committed `.sqlx/` cache, so no database is needed at build time.
+# runtime  — a slim Debian whose ONLY job is to run the binary under `tini` as PID 1. The exec-form
+#            entrypoint is load-bearing: a shell entrypoint would swallow SIGTERM and Kubernetes would
+#            SIGKILL the pod mid-drain (walrus-extractor §4.5). Under tini the binary is a direct child
+#            and receives SIGTERM itself, so its graceful-drain handler actually runs.
+
+# --- chef ------------------------------------------------------------------
+# The pinned MSRV toolchain + cargo-chef, shared by the planner and builder stages.
+FROM rust:1.96.0-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /src
+
+# --- planner ---------------------------------------------------------------
+# Test directories are omitted from this context; workspace manifests and library targets remain.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- builder ---------------------------------------------------------------
+FROM chef AS builder
+# A C/C++ toolchain for the vendored C deps (ring, zstd-sys, …); pkg-config for their build scripts.
+RUN apt-get update && apt-get install -y --no-install-recommends g++ pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+# sqlx's query! macros read the committed `.sqlx/` cache instead of connecting to a DB at build time.
+ENV SQLX_OFFLINE=true
+# Cook only extractor's dependencies. Keyed on recipe.json → a source-only change is a layer-cache hit.
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --release -p extractor --recipe-path recipe.json
+# Now the real sources; only the workspace crates recompile against the already-cooked deps.
+COPY . .
+RUN cargo build --release -p extractor --bin walrus-extractor
+
+# --- runtime ---------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+# tini: a real init that forwards SIGTERM to its child and reaps zombies. ca-certificates: the CA
+# bundle the S3/TLS client needs. No build toolchain lands here — the image stays slim.
+RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/target/release/walrus-extractor /usr/local/bin/walrus-extractor
+# EXEC FORM under tini → walrus-extractor is tini's direct child (effectively PID 1) and receives
+# SIGTERM directly, never a shell in between. This is the whole reason this Dockerfile exists.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/walrus-extractor"]

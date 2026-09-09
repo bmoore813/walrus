@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT epoch, slot_name, created_lsn AS \"created_lsn: Lsn\", status, catalog_fence_version\nFROM public.walrus_replication_state\nORDER BY epoch DESC\nLIMIT 1\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "slot_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_lsn: Lsn",
+        "type_info": {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "catalog_fence_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8fe780876116c57f314b834b854a4458d40f5b18e790feaf6994bbcaa6e4c48d"
+}

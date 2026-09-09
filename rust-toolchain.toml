@@ -1,0 +1,5 @@
+[toolchain]
+# Pin an explicit stable (not "stable") so local and CI builds agree byte-for-byte and a new
+# stable release can never turn a fresh clippy lint into a CI failure we never changed code for.
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

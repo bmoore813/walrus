@@ -1,0 +1,247 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "title": "walrus — CDC pipeline",
+  "uid": "walrus-cdc",
+  "tags": ["walrus", "cdc"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Extractor — slot & durability",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Replication lag (bytes)",
+      "description": "pg_current_wal_lsn − confirmed_flush_lsn. Dashboard-only; high after an outage is healthy catch-up.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_replication_lag_bytes" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Slot retained WAL (bytes)",
+      "description": "WAL the slot pins on disk. Backs the WalrusSlotRetainedWalHigh page.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_slot_retained_wal_bytes" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Slot wal_status (0 reserved · 1 unreserved · 2 lost)",
+      "description": "Pages at ≥ 1 (WalrusSlotWalStatusDegraded).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 2 }
+          ] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_wal_status" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Extractor — heartbeat & feedback",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Heartbeat round-trip age (s)",
+      "description": "Age of the last heartbeat write→observe-return. Backs the WalrusHeartbeatStale page.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_heartbeat_roundtrip_age_seconds" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_heartbeat_confirmed_age_seconds" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Standby-feedback age (s) & beat_seq gap",
+      "description": "Feedback age must stay well under wal_sender_timeout; beat_seq gap detects missed beats.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_feedback_age_seconds" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_beat_seq_gap" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Batch flush latency (p50 / p95)",
+      "description": "histogram_quantile over walrus_extractor_batch_flush_latency_seconds.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.5, rate(walrus_extractor_batch_flush_latency_seconds_bucket[5m]))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.95, rate(walrus_extractor_batch_flush_latency_seconds_bucket[5m]))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Extractor — memory & throughput",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "type": "timeseries",
+      "title": "In-flight & speculative buffered bytes",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 19 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_inflight_bytes", "legendFormat": "in-flight" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_extractor_speculative_open_txn_bytes", "legendFormat": "speculative" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Parquet rows written (rate/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "rows/s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 19 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_extractor_parquet_rows_written_total[5m])" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Spills / pause-polls / aborts / failed files (rate/s)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 19 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_extractor_spill_total[5m])", "legendFormat": "spill" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_extractor_pause_poll_total[5m])", "legendFormat": "pause-poll" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_extractor_aborted_txn_total[5m])", "legendFormat": "aborted-txn" },
+        { "refId": "D", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_extractor_failed_file_total[5m])", "legendFormat": "failed-file" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Transformer — backlog & lag (per table)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Files ready (backlog, per table)",
+      "description": "Backs the WalrusTransformerBacklogNotDraining page (growth that doesn't drain).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_transformer_files_ready", "legendFormat": "{{table}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Raw-append & transform lag (bytes, per table)",
+      "description": "Dashboard-only — deliberately not alerted; high lag after an outage is healthy catch-up. During a rebuild-flavor reload, the table's claims are paused, so raw-append lag grows by design and drains once export_complete lifts the pause.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_transformer_raw_append_lag_bytes", "legendFormat": "raw-append {{table}}" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_transformer_transform_lag_bytes", "legendFormat": "transform {{table}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "DDL pending & failed files (per table)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_transformer_ddl_pending", "legendFormat": "ddl-pending {{table}}" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_transformer_failed_file_total[5m])", "legendFormat": "failed {{table}}" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Single-table reload",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 }
+    },
+    {
+      "type": "stat",
+      "title": "Reloads in flight (by flavor)",
+      "description": "Non-terminal reloads the controller is exporting; returns to 0 when the queue drains.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 37 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_reload_active", "legendFormat": "{{flavor}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reload throughput (chunks & rows/s, per table)",
+      "description": "Export progress. Flat while paused/idle; rises during an active export.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "rows/s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 37 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_reload_rows_exported_total[5m])", "legendFormat": "rows/s {{table}}" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_reload_chunks_total[5m])", "legendFormat": "chunks/s {{table}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Echo round-trip (p99 seconds)",
+      "description": "Signal INSERT → decoded-commit echo (H1). p99 bounds reload throughput and tracks end-to-end decode latency.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 37 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "histogram_quantile(0.99, sum(rate(walrus_reload_echo_wait_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reload failures & anomalies",
+      "description": "restarts/failed/cap are per table; lease-stale & cross-check are the paged anomalies (cross-check != 0 means the watermark model is wrong).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 45 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_reload_restarts_total[5m])", "legendFormat": "restarts {{table}}" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "rate(walrus_reload_failed_total[5m])", "legendFormat": "failed {{table}}" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_reload_lease_stale", "legendFormat": "lease-stale" },
+        { "refId": "D", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "expr": "walrus_reload_crosscheck_violations_total", "legendFormat": "cross-check violations" }
+      ]
+    }
+  ]
+}

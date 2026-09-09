@@ -1,0 +1,66 @@
+[package]
+name = "transformer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true # the shipped artifact is the walrus-transformer image, not a registry package
+
+[lib]
+name = "transformer"
+
+[[bin]]
+name = "walrus-transformer"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+# Diagnostic-only instrumentation. Both are off in shipping/default builds.
+dhat-heap = ["dep:dhat"]
+tokio-console = ["common/tokio-console", "tokio/tracing"]
+
+[dependencies]
+common = { workspace = true }
+walrus-config = { workspace = true }
+control = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+# The transformer materialises Parquet into DuckDB; `bundled` compiles DuckDB from source (cached in CI).
+duckdb = { workspace = true, features = ["bundled"] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "net", "time", "fs", "sync", "io-util"] }
+tokio-util = { workspace = true }
+axum = { workspace = true }
+object_store = { workspace = true, features = ["aws"] }
+futures-util = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+# Stable UUID-v5 names isolate each source table's internal DuckLake objects without leaking or
+# truncating PostgreSQL identifiers into the shared catalog namespace.
+uuid = { workspace = true, features = ["v5"] }
+# Non-poisoning mutex for the health / Phase-A shared state.
+parking_lot = { workspace = true }
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Raw-HTTP scrape test (metrics_scrape.rs) reads the /metrics body via AsyncReadExt/AsyncWriteExt.
+tokio = { workspace = true, features = ["io-util"] }
+# Micro-benches: transform scaling / TOAST back-scan / Phase-A append against in-memory DuckDB.
+criterion = { workspace = true }
+# Whole-document regression coverage for deterministic transform and additive-DDL SQL.
+insta = { workspace = true }
+# The append bench generates a local Parquet fixture with the extractor's own writer (Arrow → Parquet).
+pg-to-arrow = { workspace = true }
+# `harness = false` hands the bench binary to criterion_main! instead of the libtest bench harness.
+[[bench]]
+name = "transform"
+harness = false
+
+[[bench]]
+name = "append"
+harness = false

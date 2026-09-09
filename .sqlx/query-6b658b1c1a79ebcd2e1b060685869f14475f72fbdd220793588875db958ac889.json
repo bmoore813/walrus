@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH authorized AS MATERIALIZED (\n    SELECT set_config('walrus.reload_marker_protocol', '2', true) AS protocol\n), candidate AS MATERIALIZED (\n    SELECT reload_id\n    FROM public.walrus_table_reload\n    CROSS JOIN authorized\n    WHERE reload_id = $1\n      AND authorized.protocol = '2'\n      AND (\n        (\n          status = 'exporting'\n          AND (start_lsn IS NULL OR start_lsn = $2)\n          AND (schema_version IS NULL OR schema_version = $3)\n        )\n        OR EXISTS (\n          SELECT 1\n          FROM public.walrus_table_reload_marker existing\n          WHERE existing.reload_id = public.walrus_table_reload.reload_id\n            AND existing.marker_kind = 'baseline'\n            AND existing.lsn = $2\n            AND existing.schema_version = $3\n        )\n      )\n      AND (COALESCE(source_request_id, parent_request_id) IS NULL\n           OR COALESCE(source_request_id, parent_request_id) = $4)\n      AND source_schema = $5\n      AND source_table = $6\n    FOR UPDATE\n), marker AS MATERIALIZED (\n    INSERT INTO public.walrus_table_reload_marker\n        (reload_id, marker_kind, lsn, schema_version)\n    SELECT reload_id, 'baseline', $2, $3\n    FROM candidate\n    ON CONFLICT (reload_id, marker_kind) DO UPDATE\n    SET lsn = EXCLUDED.lsn\n    WHERE public.walrus_table_reload_marker.lsn = EXCLUDED.lsn\n      AND public.walrus_table_reload_marker.schema_version = EXCLUDED.schema_version\n    RETURNING reload_id\n), frozen AS MATERIALIZED (\n    UPDATE public.walrus_table_reload AS r\n    SET start_lsn = $2,\n        schema_version = COALESCE(r.schema_version, $3),\n        updated_at = now()\n    FROM marker\n    WHERE r.reload_id = marker.reload_id\n      AND r.status = 'exporting'\n    RETURNING r.reload_id\n), deauthorized AS MATERIALIZED (\n    -- `record_start_fence` accepts a caller-owned transaction.  Do not leave the\n    -- trigger capability live for the rest of that transaction/pooled session.\n    -- The aggregates produce one row even when the guarded operation produced\n    -- none, and make clearing happen strictly after both writes.\n    SELECT pg_catalog.set_config('walrus.reload_marker_protocol', '', true) AS protocol\n    FROM (SELECT count(*) FROM marker) AS marker_result\n    CROSS JOIN (SELECT count(*) FROM frozen) AS frozen_result\n)\nSELECT marker.reload_id AS \"reload_id?\"\nFROM deauthorized\nLEFT JOIN marker ON true\nWHERE deauthorized.protocol = ''\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reload_id?",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        },
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6b658b1c1a79ebcd2e1b060685869f14475f72fbdd220793588875db958ac889"
+}

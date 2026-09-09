@@ -1,0 +1,80 @@
+[package]
+name = "extractor"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true # the shipped artifact is the walrus-extractor image, not a registry package
+
+[lib]
+name = "extractor"
+
+[[bin]]
+name = "walrus-extractor"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+# Diagnostic-only instrumentation. Both are off in shipping/default builds.
+dhat-heap = ["dep:dhat"]
+tokio-console = ["common/tokio-console", "tokio/tracing"]
+
+[dependencies]
+common = { workspace = true }
+walrus-config = { workspace = true }
+# The extractor writes to the control plane via `control`'s API; `sqlx` here only names the `PgPool`
+# `control::connect` returns (the shared control-plane handle the loop will use).
+control = { workspace = true }
+sqlx = { workspace = true, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+] }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Non-poisoning mutex for the reload-signal waiters.
+parking_lot = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Relation cache: decoded PgRelation → Arrow schema + TypeDescriptors.
+pg-to-arrow = { workspace = true }
+arrow = { workspace = true }
+# Parquet encode → S3: AsyncArrowWriter streams into an object_store multipart writer.
+parquet = { workspace = true, features = ["async"] }
+uuid = { workspace = true, features = ["v4", "v5"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "net",
+    "sync",
+    "time",
+] }
+tokio-util = { workspace = true }
+tokio-postgres = { workspace = true, features = ["runtime"] }
+axum = { workspace = true }
+object_store = { workspace = true, features = ["aws"] }
+bytes = { workspace = true }
+sha2 = { workspace = true }
+futures-util = { workspace = true }
+byteorder = { workspace = true }
+tracing = { workspace = true }
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+# Test-only: tokio::time::pause via #[tokio::test(start_paused = true)] (the reload lease tests).
+tokio = { workspace = true, features = ["test-util"] }
+# Test-only: the golden-vector renderer converts µs-since-2000 timestamps to Python's isoformat.
+jiff = { workspace = true }
+# Test-only: name the seam types (ReplicaIdentity, …) the decoder produces when asserting on them.
+common = { workspace = true }
+# Micro-benches: pgoutput decode throughput over synthetic frames.
+criterion = { workspace = true }
+
+# `harness = false` hands the bench binary to criterion_main! instead of the libtest bench harness.
+[[bench]]
+name = "decode"
+harness = false

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.walrus_table_reload\n  (epoch, source_schema, source_table, flavor, parent_request_id)\nVALUES ($1, $2, $3, $4, $5)\nRETURNING reload_id\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reload_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43691d2dd7acfac7683d77ca9ad5f57e074f056823d189d2659186539106cde0"
+}

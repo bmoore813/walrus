@@ -1,0 +1,32 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true # a test driver, not a registry package — see the workspace bar
+
+# The end-to-end integration crate drives both binaries (`walrus-extractor`, `walrus-transformer`) as black
+# boxes over the compose stack. Its one library edge to `extractor` invokes the production
+# source-request API, so that test cannot accidentally substitute a direct control-pg insert. All
+# live tests are `#[ignore]` and gated behind `--features it`, so `cargo build/test --workspace`
+# (no `it`) runs only hermetic verifier tests and never needs docker.
+[features]
+it = []
+
+[lints]
+workspace = true
+
+[dependencies]
+common = { workspace = true, features = ["sqlx"] }
+control = { workspace = true }
+extractor = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "time", "net"] }
+tokio-postgres = { workspace = true, features = ["runtime"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+duckdb = { workspace = true, features = ["bundled"] }
+object_store = { workspace = true, features = ["aws"] }
+sha2 = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4", "v5"] }

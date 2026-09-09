@@ -1,0 +1,55 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT epoch, source_schema, source_table, schema_version,\n       descriptors AS \"descriptors: Json<Vec<TypeDescriptor>>\",\n       columns AS \"columns: serde_json::Value\"\nFROM public.walrus_schema_registry\nWHERE epoch = $1 AND source_schema = $2 AND source_table = $3 AND schema_version = $4\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_schema",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_table",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "schema_version",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "descriptors: Json<Vec<TypeDescriptor>>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "columns: serde_json::Value",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bbf8ef1a54da54a04c79ccd7bbde6e2c36b8a1cd00243b1d1123b094972aa0a0"
+}

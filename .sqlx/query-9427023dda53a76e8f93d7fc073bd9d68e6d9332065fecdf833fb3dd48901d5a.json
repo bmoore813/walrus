@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT MAX(schema_version) AS max_version\nFROM public.walrus_schema_registry\nWHERE epoch = $1 AND source_schema = $2 AND source_table = $3\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max_version",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9427023dda53a76e8f93d7fc073bd9d68e6d9332065fecdf833fb3dd48901d5a"
+}

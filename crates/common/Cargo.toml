@@ -1,0 +1,59 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true # internal component; the workspace bar keeps it off every registry
+
+[lints]
+workspace = true # inherit deny(warnings) + clippy::all from the workspace root
+
+[features]
+# Opt-in sqlx `Type`/`Encode`/`Decode` for `Lsn` <-> Postgres `pg_lsn` (delegating to sqlx's
+# PgLsn). Off by default so non-DB consumers of `common` don't pull sqlx; `control`/`transformer` enable it.
+sqlx = ["dep:sqlx"]
+# The one global subscriber remains owned here. Binary-local `tokio-console` features turn this on
+# only for diagnostic builds and choose the console-aware initializer from their own `main`.
+tokio-console = ["dep:console-subscriber"]
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# ExtractorMeta's amortized split-serialization renders the meta JSON fragments in production.
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# walrus's ONE subscriber dependency: `common` is the shared bootstrap both binaries call, so the
+# single global install lives in src/telemetry.rs and every other crate emits through the `tracing`
+# facade alone. tests/subscriber_install_policy.rs is what fails when a second crate adds this dep.
+#
+# `tracing-log` is a default feature, named here to make it a contract rather than an accident: it
+# is what makes `SubscriberInitExt::try_init` install the `log` -> `tracing` bridge, so the records
+# tokio-postgres / sqlx / reqwest still emit through the `log` facade reach our subscriber. A future
+# `default-features = false` would otherwise silence them with no compile error.
+tracing-subscriber = { workspace = true, features = [
+    "env-filter",
+    "json",
+    "tracing-log",
+] }
+console-subscriber = { workspace = true, optional = true }
+# jiff over `time`: jiff::Timestamp is inherently a UTC instant and Displays as RFC-3339 with a
+# `Z` suffix, so UtcTimestamp cannot accidentally emit a local/offset datetime.
+jiff = { workspace = true }
+bytes = { workspace = true }
+# Observability: the `metrics` facade (call-site macros are no-ops until a recorder is
+# installed) + the Prometheus recorder whose handle renders the /metrics text exposition.
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+sqlx = { workspace = true, optional = true, features = [
+    "runtime-tokio",
+    "postgres",
+] }
+
+[dev-dependencies]
+# Generated LSN positions for the `Lsn` properties in src/lsn_test.rs. Dev-only by construction:
+# `common` is a library, so nothing a walrus binary links can reach a test-profile dependency.
+proptest = { workspace = true }
+# Telemetry's `RUST_LOG` fallback tests require scoped environment mutation; Jail serializes and
+# restores those mutations without adding Figment to common's production dependency graph.
+figment = { workspace = true, features = ["test"] }

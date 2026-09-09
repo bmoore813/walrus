@@ -1,0 +1,45 @@
+# deploy/k8s/base — kustomize base for the walrus data plane.
+#
+# Topology the design mandates (architecture.md#kubernetes-deployment):
+#   * walrus-extractor   — StatefulSet replicas=1  (exactly one consumer of the single lifelong slot)
+#   * walrus-transformer    — StatefulSet replicas=N, disjoint table shards over shared DuckLake
+# Both are Guaranteed QoS (requests == limits) and drain on SIGTERM (grace 90s, no preStop).
+# The extractor remains single-replica because slot ownership is exclusive; the transformer scales by changing
+# its replica and shard counts together.
+#
+# secrets.example.yaml is deliberately NOT a resource here — it is a template the operator copies to a
+# real `walrus-secrets` Secret (or lets IRSA/Workload Identity provide). CI validates it standalone.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - serviceaccount.yaml
+  - extractor-statefulset.yaml
+  - transformer-statefulset.yaml
+  - pdb.yaml
+  - slot-init-job.yaml
+
+# The slot-init Job applies the SOURCE migrations verbatim from the repo — single source of truth, so
+# the cluster bootstrap can never drift from what the extractor's preflight asserts. Rendering therefore
+# needs `--load-restrictor LoadRestrictionsNone` (the files live outside base/); scripts/k8s-validate.sh
+# and the CI `manifests` job both pass it.
+configMapGenerator:
+  - name: walrus-config
+    files:
+      - walrus.yaml
+    literals:
+      - WALRUS_PUBLICATION_NAME=walrus_pub
+  - name: walrus-slot-init-sql
+    files:
+      - 0001_publication.sql=../../../migrations/source/0001_publication.sql
+      - 0002_ddl_triggers.sql=../../../migrations/source/0002_ddl_triggers.sql
+      - 0003_reload_signal.sql=../../../migrations/source/0003_reload_signal.sql
+      - 0004_reload_event.sql=../../../migrations/source/0004_reload_event.sql
+
+generatorOptions:
+  disableNameSuffixHash: true # stable name so slot-init-job.yaml can reference it directly
+
+labels:
+  - includeSelectors: false # never touch immutable StatefulSet/Job selectors
+    pairs:
+      app.kubernetes.io/part-of: walrus

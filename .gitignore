@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target
+# Unreviewed insta output; approved `.snap` files stay tracked beside their tests.
+*.snap.new
+
+# Local environment / secrets
+.env
+
+# Python bytecode from the docs/examples/proto-version harness
+**/__pycache__/
+*.pyc

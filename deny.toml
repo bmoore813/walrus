@@ -1,0 +1,89 @@
+# deny.toml — supply-chain gate for walrus.
+#
+# Run locally with `cargo deny check`; CI runs the same in the `supply-chain` job. Four check
+# families: advisories (RUSTSEC), licenses (SPDX allow-list), bans (duplicate / disallowed crates),
+# sources (only crates.io + any pinned git). The cargo-deny version is pinned in CI so a new release
+# can't silently change this gate under us.
+
+[advisories]
+# Deny any crate carrying a RUSTSEC advisory (vulnerability / unmaintained / unsound) or a yanked
+# version. `ignore` holds audited, justified exceptions only — each entry names why the advisory does
+# not apply to walrus and what would let us drop it.
+ignore = [
+  # `paste` is unmaintained with no fixed version or maintained drop-in. It is a compile-time
+  # proc-macro pulled transitively by `parquet =54.3.1` (pinned for Parquet UUID stability)
+  # and runs only at build time, so it carries no runtime attack surface. Drop when parquet stops
+  # depending on it.
+  "RUSTSEC-2024-0436",
+  # quick-xml <0.41 DoS pair — quadratic duplicate-attribute scan (0194) and unbounded
+  # namespace-declaration allocation (0195). Both are fixed in quick-xml >=0.41, but quick-xml is
+  # reachable only transitively through `object_store`, and NO published object_store release yet
+  # caps it at >=0.41. The available upgrade path was evaluated empirically: object_store 0.11.2 → 0.37,
+  # 0.12.5 → 0.38, 0.13.2 → 0.39 (each still <0.41, so `cargo deny` re-fires both advisories), and
+  # 0.12/0.13 also drift the ObjectStore `put`/`get`/`delete` API. We therefore stay on 0.11.2 — a
+  # partial bump neither clears the advisory nor pays for its migration. In walrus, quick-xml parses
+  # only the S3 XML API responses from our own trusted object store (in-cluster MinIO), never
+  # attacker-controlled input, so the memory-exhaustion surface does not apply. Drop both once an
+  # object_store release carries quick-xml >=0.41.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+]
+
+[licenses]
+# SPDX allow-list generated from `cargo deny list` against the real tree. Every crate's
+# license expression must be satisfied by an id below, and each id here is required by at least one
+# crate that no other allowed license covers — no maximal paste, no `allow-osi-fsf-free` shortcut.
+# Deliberately absent (each satisfied by an `OR MIT`/`OR Apache-2.0` branch): 0BSD, BSD-2-Clause,
+# BSL-1.0, Unlicense, Apache-2.0-WITH-LLVM-exception, and — kept out on purpose — LGPL-2.1-or-later.
+allow = [
+  "MIT",                 # the bulk of the tree (tokio, axum, serde, sqlx, duckdb, …)
+  "Apache-2.0",          # dual MIT/Apache crates + Apache-only (flatbuffers) + ring (Apache AND ISC)
+  "BSD-3-Clause",        # alloc-no-stdlib, alloc-stdlib, snap, subtle (BSD-3-only)
+  "ISC",                 # untrusted, rustls-webpki (ISC-only); the ISC half of ring
+  "Unicode-3.0",         # the icu_* / unicode-* data crates (Unicode-3.0-only)
+  "Zlib",                # foldhash, zlib-rs (Zlib-only)
+  "CC0-1.0",             # tiny-keccak (public-domain dedication, CC0-only)
+  "CDLA-Permissive-2.0", # webpki-roots (CDLA-Permissive-2.0-only)
+]
+confidence-threshold = 0.9
+
+[bans]
+# Start at "warn": the tree carries known duplicate majors (arrow 54 vs 58, rand 0.8 vs 0.10,
+# windows-sys generations, …) pulled by transitive deps. Tighten to "deny" once the tree is
+# de-duplicated; the current warning keeps unrelated dependency updates actionable.
+multiple-versions = "warn"
+# Each future entry needs a justifying comment.
+skip = []
+# Architectural boundary (rule `err-thiserror-lib`): libraries expose matchable errors,
+# while the `transformer`, `extractor`, and `e2e` applications may erase them with anyhow. If a fourth
+# application legitimately needs anyhow, add it to `wrappers` with the dependency so
+# the boundary receives explicit review.
+# `async-trait` boxes trait futures and adds a proc macro for a language gap closed by AFIT in Rust
+# 1.75; walrus's MSRV is 1.96. Its reusable traits (`DuckResultExt`, `Clock`, `ArrowNumBuilder`) are
+# synchronous and it needs no dyn async trait. If that changes, review `trait-variant` or an explicit
+# `-> impl Future<Output = ...> + Send` bound instead of adding `#[async_trait]`.
+# The wrappers are the four direct dependents in Cargo.lock. A new path should fail for review rather
+# than being added reflexively.
+# pgoutput decode is a stateful ordered stream whose downstream contract uses
+# `(commit_lsn, lsn)`; the transformer's CPU-heavy transform is SQL run by DuckDB's own thread pool, not
+# an order-independent Rust iterator. Keep both the public crate and its pool implementation out.
+# Parallelizing either path would require an explicit ordering design rather than a dependency-only change.
+deny = [
+  { crate = "anyhow", wrappers = ["transformer", "extractor", "e2e"] },
+  { crate = "async-trait", wrappers = ["axum", "axum-core", "object_store", "tokio-postgres"] },
+  { crate = "rayon" },
+  { crate = "rayon-core" },
+  # No arithmetic-dense float-vector workload currently justifies a portable SIMD dependency.
+  { crate = "wide", reason = "no measured arithmetic-dense float-vector workload" },
+  # Nightly-oriented SIMD is outside the pinned stable toolchain.
+  { crate = "packed_simd_2", reason = "nightly-oriented SIMD is outside the stable toolchain" },
+  # An intrinsics wrapper conflicts with the workspace unsafe-code ban.
+  { crate = "simdeez", reason = "intrinsics conflict with the unsafe-code ban" },
+]
+
+[sources]
+# Only crates.io (and any explicitly allow-listed git) may supply code.
+unknown-registry = "deny"
+unknown-git = "deny"
+# No pinned git deps today; add "<url>" here (with a justifying comment) if one ever lands.
+allow-git = []

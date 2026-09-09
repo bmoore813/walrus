@@ -1,0 +1,48 @@
+# Explicit release-time DuckLake catalog migration. This is deliberately not in base/kustomization:
+# apply it and wait for completion before rolling out transformer pods, then delete/recreate it for a later
+# release. Normal transformer startup attaches with AUTOMATIC_MIGRATION=false.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: walrus-ducklake-catalog-migrate
+  labels:
+    app.kubernetes.io/name: walrus-ducklake-catalog-migrate
+    app.kubernetes.io/part-of: walrus
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: walrus-ducklake-catalog-migrate
+        app.kubernetes.io/name: walrus-ducklake-catalog-migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: walrus
+      containers:
+        - name: migrate
+          image: walrus-transformer:latest
+          args: ["--migrate-ducklake-catalog"]
+          env:
+            - name: WALRUS_CONFIG
+              value: /etc/walrus/walrus.yaml
+            - name: WALRUS_INSTANCE
+              value: walrus-ducklake-catalog-migrate
+            - name: WALRUS_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_CONTROL_DB_URL
+            - name: WALRUS_DUCKLAKE__CATALOG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_DUCKLAKE_CATALOG_URL
+          volumeMounts:
+            - name: walrus-config
+              mountPath: /etc/walrus
+              readOnly: true
+      volumes:
+        - name: walrus-config
+          configMap:
+            name: walrus-config

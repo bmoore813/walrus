@@ -1,0 +1,134 @@
+# walrus-extractor: exactly ONE consumer of the single lifelong replication slot (architecture §1.8).
+# replicas=1 is the anti-thrash guarantee; the real split-brain backstop is Postgres itself — a second
+# START_REPLICATION on the active slot fails, so a replacement pod just retries with backoff. Scale
+# VERTICALLY only (cpu/memory); never raise replicas (multi-slot sharding permanently breaks the design).
+---
+# Headless Service governs the StatefulSet's stable network identity (walrus-extractor-0) and exposes the
+# health/metrics port. Not a load balancer — there is only ever one pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: walrus-extractor
+  labels:
+    app.kubernetes.io/name: walrus-extractor
+spec:
+  clusterIP: None
+  selector:
+    app: walrus-extractor
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: walrus-extractor
+  labels:
+    app.kubernetes.io/name: walrus-extractor
+spec:
+  replicas: 1 # exactly one consumer of the single lifelong slot — never raise this
+  serviceName: walrus-extractor
+  selector:
+    matchLabels:
+      app: walrus-extractor
+  template:
+    metadata:
+      labels:
+        app: walrus-extractor
+        app.kubernetes.io/name: walrus-extractor
+    spec:
+      serviceAccountName: walrus
+      # Measured worst-case drain (batch encode → Parquet → S3 PUT → manifest commit → final feedback).
+      # 90s sits in the design's 60–120s window. NO preStop hook: any preStop time is subtracted from
+      # this same budget, and SIGTERM already reaches the binary through tini's exec-form entrypoint,
+      # so the drain handler runs from T=0 with the full budget.
+      terminationGracePeriodSeconds: 90
+      # Ordered bootstrap: don't start the extractor until the control DB answers, so its own startup-deadline
+      # budget isn't spent waiting on an unreachable dependency.
+      initContainers:
+        - name: wait-control-db
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - 'until psql "$WALRUS_CONTROL_DB_URL" -tAc "select 1" >/dev/null 2>&1; do echo "waiting for control DB..."; sleep 2; done'
+          env:
+            - name: WALRUS_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_CONTROL_DB_URL
+      containers:
+        - name: extractor
+          image: walrus-extractor:latest # overridden per-environment via a kustomize overlay `images:` tag
+          ports:
+            - name: http
+              containerPort: 8080
+          # Guaranteed QoS: requests == limits, so the pod is never evicted under node pressure mid-drain.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          env:
+            - name: WALRUS_CONFIG
+              value: /etc/walrus/walrus.yaml
+            # Stable per-pod identity (walrus-extractor-0). Overrides any INSTANCE from the ConfigMap.
+            - name: WALRUS_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WALRUS_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_CONTROL_DB_URL
+            - name: WALRUS_SOURCE_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_SOURCE_DB_URL
+            - name: WALRUS_PUBLICATION_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: walrus-config
+                  key: WALRUS_PUBLICATION_NAME
+          volumeMounts:
+            - name: walrus-config
+              mountPath: /etc/walrus
+              readOnly: true
+          # startup GATES local bootstrap and, while it is failing, K8s runs neither readiness nor
+          # liveness. Initial table reconciliation continues after local startup. 120×5s = 10 min budget.
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+            timeoutSeconds: 3
+          # readiness HOLDS work: bootstrap done + not terminating. A stale-heartbeat "degraded" extractor is
+          # reported but stays ready (it is catching up by design) — readiness is NEVER gated on slot lag.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          # liveness = deadlock detection ONLY (the decode loop is making progress). NEVER slot lag: a pod
+          # catching up after an outage has high lag by design and a lag-based liveness probe would kill it
+          # exactly when it is doing its job (walrus-extractor §4.3).
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+      volumes:
+        - name: walrus-config
+          configMap:
+            name: walrus-config

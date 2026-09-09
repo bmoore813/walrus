@@ -1,0 +1,33 @@
+---
+source: crates/transformer/src/transform_test.rs
+expression: "toast.render_ducklake(Lsn::new(0x2A),\nSome(TruncateBoundary { ct: Lsn::new(0x30), lt: Lsn::new(0x31), }),)"
+---
+-- DuckLake variant of transform.sql. DuckLake currently permits only one matched UPDATE/DELETE
+-- action per MERGE, so deletes and upserts are split while remaining in the caller's one ACID
+-- transaction/snapshot.
+DELETE FROM "notes";
+CREATE OR REPLACE TEMP TABLE _batch AS
+WITH winners AS (
+    SELECT raw_winner.* FROM "notes_raw" raw_winner
+    WHERE raw_winner._walrus_op <> 't'
+      AND raw_winner._walrus_commit_lsn >= '000000000000002A' AND (_walrus_commit_lsn, _walrus_lsn) > ('0000000000000030', '0000000000000031')
+    QUALIFY row_number() OVER (
+        PARTITION BY raw_winner.id
+        ORDER BY raw_winner._walrus_commit_lsn DESC, raw_winner._walrus_lsn DESC,
+                 CASE WHEN raw_winner._walrus_op = 'd' THEN 0 ELSE 1 END DESC
+    ) = 1
+)
+SELECT s.id AS id, CASE WHEN COALESCE(json_extract_string(s.walrus_extractor_meta, '$.unchanged_toast'), '[]') LIKE '%"body"%' ESCAPE '\' THEN COALESCE(( WITH RECURSIVE _walrus_toast_lineage(_walrus_depth, _walrus_key_0, _walrus_upper_commit_lsn, _walrus_upper_lsn, _walrus_has_edge, _walrus_edge_commit_lsn, _walrus_edge_lsn, _walrus_old_key_0) AS ( SELECT 0, s.id, s._walrus_commit_lsn, s._walrus_lsn, edge._walrus_edge_found IS NOT NULL, edge._walrus_edge_commit_lsn, edge._walrus_edge_lsn, edge._walrus_old_key_0 FROM (VALUES (TRUE)) AS seed(_walrus_dummy) LEFT JOIN LATERAL (SELECT TRUE AS _walrus_edge_found, u._walrus_commit_lsn AS _walrus_edge_commit_lsn, u._walrus_lsn AS _walrus_edge_lsn, d.id AS _walrus_old_key_0 FROM "notes_raw" u JOIN "notes_raw" d ON d._walrus_op = 'd' AND d._walrus_commit_lsn IS NOT DISTINCT FROM u._walrus_commit_lsn AND d._walrus_lsn IS NOT DISTINCT FROM u._walrus_lsn WHERE u._walrus_op = 'u' AND u.id IS NOT DISTINCT FROM (s.id) AND (u._walrus_commit_lsn, u._walrus_lsn) <= (s._walrus_commit_lsn, s._walrus_lsn) AND NOT (d.id IS NOT DISTINCT FROM u.id) ORDER BY u._walrus_commit_lsn DESC, u._walrus_lsn DESC LIMIT 1) edge ON TRUE UNION ALL SELECT lineage._walrus_depth + 1, lineage._walrus_old_key_0, lineage._walrus_edge_commit_lsn, lineage._walrus_edge_lsn, edge._walrus_edge_found IS NOT NULL, edge._walrus_edge_commit_lsn, edge._walrus_edge_lsn, edge._walrus_old_key_0 FROM _walrus_toast_lineage lineage LEFT JOIN LATERAL (SELECT TRUE AS _walrus_edge_found, u._walrus_commit_lsn AS _walrus_edge_commit_lsn, u._walrus_lsn AS _walrus_edge_lsn, d.id AS _walrus_old_key_0 FROM "notes_raw" u JOIN "notes_raw" d ON d._walrus_op = 'd' AND d._walrus_commit_lsn IS NOT DISTINCT FROM u._walrus_commit_lsn AND d._walrus_lsn IS NOT DISTINCT FROM u._walrus_lsn WHERE u._walrus_op = 'u' AND u.id IS NOT DISTINCT FROM (lineage._walrus_old_key_0) AND (u._walrus_commit_lsn, u._walrus_lsn) < (lineage._walrus_edge_commit_lsn, lineage._walrus_edge_lsn) AND NOT (d.id IS NOT DISTINCT FROM u.id) ORDER BY u._walrus_commit_lsn DESC, u._walrus_lsn DESC LIMIT 1) edge ON TRUE WHERE lineage._walrus_has_edge ) SELECT COALESCE(raw_value._walrus_value, mirror_value._walrus_value) FROM _walrus_toast_lineage lineage LEFT JOIN LATERAL ( SELECT list_value(r.body) AS _walrus_value FROM "notes_raw" r WHERE r.id IS NOT DISTINCT FROM lineage._walrus_key_0 AND r._walrus_op NOT IN ('d', 't') AND NOT (COALESCE(json_extract_string(r.walrus_extractor_meta, '$.unchanged_toast'), '[]') LIKE '%"body"%' ESCAPE '\') AND (r._walrus_commit_lsn, r._walrus_lsn) <= (lineage._walrus_upper_commit_lsn, lineage._walrus_upper_lsn) AND (NOT lineage._walrus_has_edge OR (r._walrus_commit_lsn, r._walrus_lsn) >= (lineage._walrus_edge_commit_lsn, lineage._walrus_edge_lsn)) ORDER BY r._walrus_commit_lsn DESC, r._walrus_lsn DESC LIMIT 1 ) raw_value ON TRUE LEFT JOIN LATERAL ( SELECT list_value(m.body) AS _walrus_value FROM "notes" m WHERE m.id IS NOT DISTINCT FROM lineage._walrus_key_0 LIMIT 1 ) mirror_value ON TRUE WHERE raw_value._walrus_value IS NOT NULL OR mirror_value._walrus_value IS NOT NULL ORDER BY lineage._walrus_depth LIMIT 1 ), list_value(t.body))[1] ELSE s.body END AS body, s._walrus_op, s._walrus_commit_lsn, s._walrus_lsn
+FROM winners s
+LEFT JOIN "notes" t ON t.id IS NOT DISTINCT FROM s.id;
+
+MERGE INTO "notes" AS t
+USING (SELECT * FROM _batch WHERE _walrus_op = 'd') AS s
+ON t.id IS NOT DISTINCT FROM s.id
+WHEN MATCHED AND (s._walrus_commit_lsn, s._walrus_lsn) > (t._applied_commit_lsn, t._applied_lsn) THEN DELETE;
+
+MERGE INTO "notes" AS t
+USING (SELECT * FROM _batch WHERE _walrus_op <> 'd') AS s
+ON t.id IS NOT DISTINCT FROM s.id
+WHEN MATCHED AND (s._walrus_commit_lsn, s._walrus_lsn) > (t._applied_commit_lsn, t._applied_lsn) THEN UPDATE SET body = s.body, _applied_commit_lsn = s._walrus_commit_lsn, _applied_lsn = s._walrus_lsn
+WHEN NOT MATCHED THEN INSERT (id, body, _applied_commit_lsn, _applied_lsn) VALUES (s.id, s.body, s._walrus_commit_lsn, s._walrus_lsn);

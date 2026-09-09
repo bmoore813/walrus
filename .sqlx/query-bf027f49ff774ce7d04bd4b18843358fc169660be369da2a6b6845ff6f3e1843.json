@@ -1,0 +1,45 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reload_id,\n       marker_kind AS \"marker_kind: ReloadMarkerKind\",\n       lsn AS \"lsn: Lsn\",\n       schema_version\nFROM public.walrus_table_reload_marker\nWHERE reload_id = $1\nORDER BY CASE marker_kind WHEN 'baseline' THEN 0 ELSE 1 END\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reload_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "marker_kind: ReloadMarkerKind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "lsn: Lsn",
+        "type_info": {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "schema_version",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bf027f49ff774ce7d04bd4b18843358fc169660be369da2a6b6845ff6f3e1843"
+}

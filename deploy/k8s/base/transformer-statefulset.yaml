@@ -1,0 +1,115 @@
+# walrus-transformer: table-sharded DuckLake writers. Start with one replica; scale by raising both this
+# count and WALRUS_SHARD_COUNT. Rendezvous hashing chooses disjoint tables and the control lease fences
+# handoffs, while every replica attaches to the same PostgreSQL catalog + S3 data path.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: walrus-transformer
+  labels:
+    app.kubernetes.io/name: walrus-transformer
+spec:
+  clusterIP: None
+  selector:
+    app: walrus-transformer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: walrus-transformer
+  labels:
+    app.kubernetes.io/name: walrus-transformer
+spec:
+  replicas: 1 # raise together with WALRUS_SHARD_COUNT after the single-writer soak
+  serviceName: walrus-transformer
+  selector:
+    matchLabels:
+      app: walrus-transformer
+  template:
+    metadata:
+      labels:
+        app: walrus-transformer
+        app.kubernetes.io/name: walrus-transformer
+    spec:
+      serviceAccountName: walrus
+      # Drain (finish Phase-A append + Phase-B transform, commit both watermarks, detach DuckLake,
+      # release lease) fits the 60–120s window. No preStop, for the same reason as the extractor.
+      terminationGracePeriodSeconds: 90
+      # The transformer cannot bootstrap until the extractor has established an epoch + registered tables (it exits
+      # otherwise). Wait for the epoch row so the transformer doesn't CrashLoopBackOff ahead of the extractor.
+      initContainers:
+        - name: wait-epoch
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - 'until psql "$WALRUS_CONTROL_DB_URL" -tAc "select 1 from public.walrus_replication_state limit 1" 2>/dev/null | grep -q 1; do echo "waiting for extractor to establish an epoch..."; sleep 2; done'
+          env:
+            - name: WALRUS_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_CONTROL_DB_URL
+      containers:
+        - name: transformer
+          image: walrus-transformer:latest # overridden per-environment via a kustomize overlay `images:` tag
+          ports:
+            - name: http
+              containerPort: 8080
+          resources: # Guaranteed QoS; memory headroom for DuckDB's working set above the buffered set
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          env:
+            - name: WALRUS_CONFIG
+              value: /etc/walrus/walrus.yaml
+            - name: WALRUS_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WALRUS_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_CONTROL_DB_URL
+            - name: WALRUS_DUCKLAKE__CATALOG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_DUCKLAKE_CATALOG_URL
+          volumeMounts:
+            - name: walrus-config
+              mountPath: /etc/walrus
+              readOnly: true
+          startupProbe: # gates the slow lease-acquire + DuckDB open; suppresses readiness/liveness meanwhile
+            httpGet:
+              path: /startup
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+            timeoutSeconds: 3
+          readinessProbe: # bootstrap done + no quarantined table; a legitimately-behind transformer stays ready
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe: # progress-only: the apply loop stamped last_poll — an idle-but-healthy transformer stays live
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+      volumes:
+        - name: walrus-config
+          configMap:
+            name: walrus-config

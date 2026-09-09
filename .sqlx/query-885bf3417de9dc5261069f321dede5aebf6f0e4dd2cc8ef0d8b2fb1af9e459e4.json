@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT epoch, source_schema, source_table,\n       raw_appended_lsn AS \"raw_appended_lsn: Lsn\",\n       transformed_lsn AS \"transformed_lsn: Lsn\"\nFROM public.walrus_transformer_checkpoint\nWHERE epoch = $1 AND source_schema = $2 AND source_table = $3\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_schema",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_table",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "raw_appended_lsn: Lsn",
+        "type_info": {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "transformed_lsn: Lsn",
+        "type_info": {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "885bf3417de9dc5261069f321dede5aebf6f0e4dd2cc8ef0d8b2fb1af9e459e4"
+}

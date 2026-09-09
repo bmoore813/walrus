@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage image for the `walrus-transformer` binary, with cargo-chef dependency-layer caching.
+# cargo-chef splits the dependency build — including the bundled DuckDB C++ compile — into a `cook`
+# layer keyed on dependency metadata and deployable target topology, so a production source-only
+# change reuses it from the GHA layer cache (`type=gha,mode=max`) and recompiles just the workspace
+# crates. `.dockerignore` keeps test-only target discovery out of that topology. BuildKit cache MOUNTS
+# can't achieve this: cargo's mtime-based fingerprinting re-runs the DuckDB build script after a
+# cache tar-restore, so the ~15-20 min C++ build repeats regardless.
+#
+# Two DuckDB-driven needs remain: the builder installs a C++ toolchain (build-essential) because
+# `duckdb`'s `bundled` feature compiles DuckDB's vendored C++ from source; the runtime installs
+# libstdc++6, which that bundled DuckDB dynamically links.
+
+# --- chef ------------------------------------------------------------------
+# The pinned MSRV toolchain (1.96.0, matching rust-toolchain.toml) + cargo-chef, shared by the planner
+# and builder stages. `cargo install` compiles chef once; the layer is cached across runs.
+FROM rust:1.96.0-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /src
+
+# --- planner ---------------------------------------------------------------
+# Distil the release-relevant workspace into recipe.json — a dependency-only skeleton that is the
+# cook cache key. Test directories are omitted from the context, while their package manifests and
+# library targets remain available for valid workspace metadata.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- builder ---------------------------------------------------------------
+FROM chef AS builder
+# build-essential (gcc/g++/make) for DuckDB's bundled C++ compile + the vendored C deps; pkg-config
+# for their build scripts.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# sqlx's query! macros read the committed `.sqlx/` cache instead of connecting to a DB at build time.
+ENV SQLX_OFFLINE=true
+# Cook only transformer's dependencies (incl. the DuckDB C++ build). This layer is keyed on recipe.json, so
+# a source-only change leaves it untouched → layer-cache hit → DuckDB is not recompiled.
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --release -p transformer --recipe-path recipe.json
+# Now the real sources; only the workspace crates recompile against the already-cooked deps.
+COPY . .
+RUN cargo build --release -p transformer --bin walrus-transformer
+# Resolve and cache extensions against the exact bundled DuckDB engine at image-build time. Runtime
+# starts with downloads disabled, so every deployed executable is supplied by this immutable image.
+RUN /src/target/release/walrus-transformer --install-duckdb-extensions /opt/walrus/duckdb_extensions
+
+# --- runtime ---------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+# tini (PID-1 init that forwards SIGTERM), ca-certificates (S3/TLS + DuckDB httpfs extension
+# download), and libstdc++6 (the bundled DuckDB's C++ runtime — the classic "missing shared lib").
+RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /src/target/release/walrus-transformer /usr/local/bin/walrus-transformer
+COPY --from=builder /opt/walrus/duckdb_extensions /opt/walrus/duckdb_extensions
+# EXEC FORM under tini → walrus-transformer is tini's direct child and receives SIGTERM directly.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/walrus-transformer"]

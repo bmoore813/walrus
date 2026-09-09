@@ -1,0 +1,20 @@
+# .dockerignore — trim the build context for deploy/docker/Dockerfile.*.
+#
+# The release build needs Cargo.toml, Cargo.lock, crates/, tests/ (workspace members),
+# migrations/ (sqlx::migrate! embeds migrations/control at compile time) and .sqlx/ (the offline
+# query cache). Everything below is excluded so the context stays small and layer-cacheable — most
+# importantly target/, which is many gigabytes of build artifacts.
+target/
+**/target/
+.git/
+.gitignore
+.github/
+.claude/
+docs/
+*.md
+
+# Release images do not compile integration/e2e targets. Keep every workspace member's Cargo.toml
+# and src/ tree so Cargo metadata remains valid, but omit auto-discovered test targets. Otherwise
+# merely adding an e2e test changes cargo-chef's recipe and cold-rebuilds bundled DuckDB (~18 min).
+crates/*/tests/
+tests/e2e/tests/

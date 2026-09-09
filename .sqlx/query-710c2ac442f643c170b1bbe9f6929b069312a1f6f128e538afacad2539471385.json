@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH authorized AS MATERIALIZED (\n    SELECT set_config('walrus.reload_marker_protocol', '2', true) AS protocol\n), recorded AS MATERIALIZED (\n    INSERT INTO public.walrus_table_reload_marker\n        (reload_id, marker_kind, lsn, schema_version)\n    SELECT reload_id, 'end', $2, schema_version\n    FROM public.walrus_table_reload\n         CROSS JOIN authorized\n    WHERE reload_id = $1\n      AND authorized.protocol = '2'\n      AND schema_version IS NOT NULL\n      AND schema_version = $3\n      AND (COALESCE(source_request_id, parent_request_id) IS NULL\n           OR COALESCE(source_request_id, parent_request_id) = $4)\n      AND source_schema = $5\n      AND source_table = $6\n      AND (\n        (\n          status = 'exporting'\n          AND start_lsn IS NOT NULL\n          AND start_lsn <= $2\n        )\n        OR EXISTS (\n          SELECT 1 FROM public.walrus_table_reload_marker m\n          WHERE m.reload_id = public.walrus_table_reload.reload_id\n            AND m.marker_kind = 'end'\n            AND m.lsn = $2\n            AND m.schema_version = public.walrus_table_reload.schema_version\n        )\n      )\n    ON CONFLICT (reload_id, marker_kind) DO UPDATE\n    SET lsn = EXCLUDED.lsn\n    WHERE public.walrus_table_reload_marker.lsn = EXCLUDED.lsn\n      AND public.walrus_table_reload_marker.schema_version = EXCLUDED.schema_version\n    RETURNING reload_id\n), deauthorized AS MATERIALIZED (\n    SELECT pg_catalog.set_config('walrus.reload_marker_protocol', '', true) AS protocol\n    FROM (SELECT count(*) FROM recorded) AS operation_result\n)\nSELECT recorded.reload_id AS \"reload_id?\"\nFROM deauthorized\nLEFT JOIN recorded ON true\nWHERE deauthorized.protocol = ''\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reload_id?",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        },
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "710c2ac442f643c170b1bbe9f6929b069312a1f6f128e538afacad2539471385"
+}

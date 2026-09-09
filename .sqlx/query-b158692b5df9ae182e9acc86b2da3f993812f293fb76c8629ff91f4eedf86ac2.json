@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.walrus_replication_state\n  (epoch, slot_name, created_lsn, status, catalog_fence_version)\nSELECT COALESCE(MAX(epoch), 0) + 1, $1, $2, $3, 0\nFROM public.walrus_replication_state\nRETURNING epoch\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        },
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b158692b5df9ae182e9acc86b2da3f993812f293fb76c8629ff91f4eedf86ac2"
+}

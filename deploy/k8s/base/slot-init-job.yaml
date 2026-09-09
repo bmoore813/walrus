@@ -1,0 +1,124 @@
+# One-shot bootstrap of the SOURCE database. Run once before (or alongside) the extractor. The Job name
+# carries the newest source migration so applying this release creates a fresh Job even when an older
+# fixed-name bootstrap Job has already completed; bump it again when a future source migration lands.
+#
+# What it does — the deployment-independent source-side setup the extractor cannot self-apply while running
+# with WALRUS_MANAGE_PUBLICATION=false:
+#   1. migrations/source/0001_publication.sql — the public.walrus_heartbeat + public.walrus_ddl_audit tables.
+#   2. migrations/source/0002_ddl_triggers.sql — public.walrus_ddl_audit columns + the ddl_command_end / sql_drop
+#      event triggers (a missing trigger is a terminal preflight failure).
+#   3. migrations/source/0003_reload_signal.sql — the public.walrus_reload_signal chunk-watermark table
+#      (an absent/unpublished signal table is a terminal preflight failure — the reload echo would
+#      silently never arrive).
+#   4. migrations/source/0004_reload_event.sql — durable source-side reload requests and start/end
+#      fence events (an absent/unpublished event table is a terminal preflight failure).
+#   5. Ensures the configured publication exists — idempotently, as FOR ALL TABLES when absent. When
+#      it already exists as an explicit-list publication, adds every required walrus internal table
+#      without changing its user-table inventory.
+# The SQL in 1–4 is the repo's real migrations, mounted from the `walrus-slot-init-sql` ConfigMap that
+# kustomize generates from those files — single source of truth, so the cluster can't drift from what the
+# extractor's preflight asserts.
+#
+# What it does NOT do: create the replication slot, write the epoch, or run control-plane migrations.
+# The extractor creates a snapshot-free slot, records a bootstrapping epoch, and requests the same fenced
+# whole-table reconciliation protocol used for later repairs.
+#
+# This base intentionally uses one WALRUS_SOURCE_DB_URL for installation and the running extractor. The
+# installer therefore needs source-admin authority: ownership/ALTER rights on the publication and
+# walrus tables plus the privilege to CREATE EVENT TRIGGER (normally superuser). At runtime the same
+# credential needs REPLICATION; SELECT on every published user and walrus table; INSERT on
+# public.walrus_reload_event; UPDATE on public.walrus_heartbeat; and enough target-table privilege to take the
+# reload fence lock. Production deployments may split this Job onto a separate admin-only Secret,
+# leaving the StatefulSet with only the runtime grants.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: walrus-slot-init-0004
+  labels:
+    app.kubernetes.io/name: walrus-slot-init
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: walrus-slot-init
+        app.kubernetes.io/name: walrus-slot-init
+    spec:
+      serviceAccountName: walrus
+      restartPolicy: OnFailure
+      containers:
+        - name: slot-init
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -euc
+            - |
+              echo "applying source migrations (walrus tables + DDL triggers)"
+              psql "$WALRUS_SOURCE_DB_URL" -v ON_ERROR_STOP=1 -f /sql/0001_publication.sql
+              psql "$WALRUS_SOURCE_DB_URL" -v ON_ERROR_STOP=1 -f /sql/0002_ddl_triggers.sql
+              psql "$WALRUS_SOURCE_DB_URL" -v ON_ERROR_STOP=1 -f /sql/0003_reload_signal.sql
+              psql "$WALRUS_SOURCE_DB_URL" -v ON_ERROR_STOP=1 -f /sql/0004_reload_event.sql
+              echo "ensuring configured publication and walrus protocol tables"
+              psql "$WALRUS_SOURCE_DB_URL" -v ON_ERROR_STOP=1 \
+                -v publication_name="$WALRUS_PUBLICATION_NAME" <<'SQL'
+              BEGIN;
+
+              -- `:'publication_name'` is a psql-quoted SQL value and format('%I', ...) produces the
+              -- identifier. No publication name is interpolated into shell SQL.
+              SELECT format('CREATE PUBLICATION %I FOR ALL TABLES', :'publication_name')
+              WHERE NOT EXISTS (
+                SELECT 1 FROM pg_catalog.pg_publication
+                WHERE pubname = :'publication_name'
+              )
+              \gexec
+
+              -- FOR ALL TABLES already covers these. For an explicit-list/schema publication, add
+              -- exactly the missing internal members and leave every user-table entry untouched.
+              WITH required(schemaname, tablename) AS (
+                VALUES
+                  ('public', 'walrus_heartbeat'),
+                  ('public', 'walrus_ddl_audit'),
+                  ('public', 'walrus_reload_signal'),
+                  ('public', 'walrus_reload_event')
+              )
+              SELECT format(
+                       'ALTER PUBLICATION %I ADD TABLE %I.%I',
+                       :'publication_name', required.schemaname, required.tablename
+                     )
+              FROM required
+              JOIN pg_catalog.pg_publication publication
+                ON publication.pubname = :'publication_name'
+              WHERE NOT publication.puballtables
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_catalog.pg_publication_tables member
+                  WHERE member.pubname = publication.pubname
+                    AND member.schemaname = required.schemaname
+                    AND member.tablename = required.tablename
+                )
+              ORDER BY required.schemaname, required.tablename
+              \gexec
+
+              COMMIT;
+              SQL
+              echo "slot-init: source publication + walrus tables + DDL triggers applied"
+          env:
+            - name: WALRUS_SOURCE_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: walrus-secrets
+                  key: WALRUS_SOURCE_DB_URL
+            # Same publication name the extractor asserts — one scalar alongside the shared YAML.
+            - name: WALRUS_PUBLICATION_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: walrus-config
+                  key: WALRUS_PUBLICATION_NAME
+          volumeMounts:
+            - name: sql
+              mountPath: /sql
+              readOnly: true
+      volumes:
+        - name: sql
+          configMap:
+            name: walrus-slot-init-sql

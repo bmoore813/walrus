@@ -1,0 +1,509 @@
+[workspace]
+resolver = "2"
+members = ["crates/common", "crates/walrus-config", "crates/control", "crates/transformer", "crates/extractor", "crates/pg-to-arrow", "tests/e2e"]
+
+[workspace.package]
+edition = "2024" # if-let chains require edition 2024 + Rust 1.88; walrus pins 1.96.0.
+license = "MIT"
+rust-version = "1.96" # MSRV — keep in sync with rust-toolchain.toml; CI `msrv` job fails on drift
+# That job reads this line alone, so per-member inheritance is a separate guard: every member takes
+# its floor from here with `rust-version.workspace = true`; one that states its own — or omits the
+# key, leaving Cargo no MSRV to check — fails crates/common/tests/msrv_inherited.rs.
+
+# walrus ships two container images, not registry packages: `common`, `control`, `extractor`, and
+# `transformer` describe internal or deployment roles, not crates.io identities. That is why no
+# member carries the metadata a published crate owes its readers (description, repository, keywords,
+# categories) — and this key is what makes
+# that absence a decision rather than an omission. Every member inherits it with
+# `publish.workspace = true`; crates/common/tests/publish_policy.rs fails when one does not.
+publish = false
+
+# Lint-as-policy, centralised so no member crate can silently opt out of `deny(warnings)`.
+# NOTE: these only take effect in a member once it declares `[lints] workspace = true`.
+[workspace.lints.rust]
+warnings = "deny"
+# Public library APIs are integration seams between independently deployable services and their
+# black-box tests. Keep those seams documented as they evolve instead of relying on periodic doc
+# audits to rediscover omissions.
+missing_docs = "deny"
+# Every public type must format under `{:?}` for diagnostics and tracing. This rustc lint is
+# allow-by-default, so the warnings group does not enable it.
+missing_debug_implementations = "deny"
+# The rustc `unsafe-code` lint is allow-by-default, so `warnings = "deny"` never reaches it.
+# `forbid` prevents a member from reopening the door with an allow attribute; walrus has no sites.
+unsafe_code = "forbid"
+# Edition 2024 (workspace.package above) makes this warn-by-default and `warnings = "deny"` already
+# escalates it; the named entry pins the policy independently of that group. It is what keeps an
+# `unsafe fn` from implicitly blessing its body: each unsafe op needs its own minimized `unsafe {}`.
+unsafe_op_in_unsafe_fn = "deny"
+# walrus authors no extern blocks. Its configured native engine is dependency-owned: `duckdb` with
+# `bundled` (crates/transformer/Cargo.toml:23; crates/pg-to-arrow/Cargo.toml:30) compiles C++ and generated
+# declarations in pinned `libduckdb-sys`. Other dependency FFI is likewise not first-party. This
+# lint is allow-by-default here, so deny it explicitly to reject pre-2024 extern-block spelling.
+missing_unsafe_on_extern = "deny"
+# The tree has no no_mangle/export_name/link_section attributes and declares no custom crate type;
+# its production artifacts are the walrus-extractor and walrus-transformer executables. Deny the otherwise
+# allow-by-default bare spelling because duplicate exported symbols can create linker-level UB.
+unsafe_attr_outside_unsafe = "deny"
+# This rustc lint is allow-by-default, so `warnings = "deny"` does not enable it.
+missing_copy_implementations = "deny"
+# A cfg the compiler does not recognise is not an error — it is simply false. So a mistyped feature
+# gate (`#[cfg(feature = "sqlx_")]`) compiles, matches nothing, and takes its whole block out of the
+# build with no diagnostic at all. `unexpected_cfgs` is what rejects it, over both halves of the
+# predicate: the cfg *name*, and — because Cargo hands rustc each package's declared feature list —
+# the *value* of `feature = "…"`. Warn-by-default since Rust 1.80, so `warnings = "deny"` above
+# already escalates it; the named entry pins the policy independently of that group, exactly as
+# `unsafe_op_in_unsafe_fn` does. It carries no `check-cfg` array because walrus has no custom cfg to
+# declare: every predicate in the tree is either built-in (`test`, `debug_assertions`, `unix`,
+# `target_pointer_width`) or one of the four declared features (`sqlx`, `integration`,
+# `conformance`, `it`), and Cargo registers those itself. The first custom cfg belongs in a
+# `check-cfg` list on this entry; the only other place one can be registered — a build script — is
+# what crates/common/tests/workspace_lints_inherited.rs rules out.
+unexpected_cfgs = "deny"
+
+[workspace.lints.rustdoc]
+# An intra-doc link is part of the public navigation surface. Reject stale paths when modules or
+# re-exports move instead of publishing documentation with silent dead links.
+broken_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+# `clippy::all` carries the correctness group today — the lints for code that is simply wrong
+# (`unit_cmp`, `never_loop`, `unused_io_amount`, `iter_next_loop`). Which lints that group carries is
+# clippy's to redraw, so pin correctness by name, exactly as `ptr_arg` and `missing_safety_doc` are
+# pinned below. The explicit `priority = -1` is load-bearing rather than decoration: a group entry at
+# or above a named lint's priority overrides that lint, and every named entry here sits at the
+# default 0 — so the bare `correctness = "deny"` spelling would itself go red under
+# `clippy::lint_groups_priority`, which is a correctness lint. No source file changes either way,
+# so crates/common/tests/workspace_lints_inherited.rs is what notices if this entry drifts.
+correctness = { level = "deny", priority = -1 }
+# `clippy::suspicious` is the group next door: not code that is provably wrong, but code that is
+# almost always a mistake — `suspicious_else_formatting`, `suspicious_map`, `suspicious_splitn`,
+# `suspicious_arithmetic_impl`. Pinned by name for the reason `correctness` is, and it is not idle
+# belt-and-braces: three lints this group carries today are already named below on their own merits
+# (`await_holding_lock`, `await_holding_refcell_ref`, `await_holding_invalid_type`). The level is
+# the table's rather than a bare warn: under `warnings = "deny"` above the two produce the same
+# diagnostic, but only one of them states the policy. `priority = -1` is required for the reason
+# given above — every named entry here sits at the default 0, and a group at or above a named lint's
+# priority overrides it. crates/common/tests/workspace_lints_inherited.rs notices if it drifts.
+suspicious = { level = "deny", priority = -1 }
+# `clippy::style` is the third rung of that ladder: not code that is wrong, nor code that is almost
+# always a mistake, but the non-idiomatic spelling of something correct — `len_zero`,
+# `redundant_field_names`, `needless_return`, `single_match`, `question_mark`. Pinned by name for
+# the reason the two above are, and it is the first of the three whose reach shows up in the source
+# rather than only in this table: three of its lints are already named below on their own merits
+# (`from_over_into`, `ptr_arg`, `missing_safety_doc`), and two sites hold a scoped allow with a
+# reason — `new_ret_no_self` in crates/extractor/src/health.rs, whose `new` hands back the shared
+# `Arc` handle the probes and the replication loop hold, and `op_ref` in
+# crates/common/src/lsn_test.rs, which exercises the borrowed `Sub` impl on purpose. `priority = -1`
+# is required for the reason given above — every named entry here sits at the default 0, and a group
+# at or above a named lint's priority overrides it. The level is the table's rather than a bare
+# warn for the reason `suspicious` gives. crates/common/tests/workspace_lints_inherited.rs notices
+# if this entry drifts.
+style = { level = "deny", priority = -1 }
+# `clippy::complexity` steps off that ladder rather than adding a rung to it: not a further degree
+# of wrongness, but the other axis — code that is correct, idiomatically spelled, and simply says it
+# the long way round (`needless_match`, `useless_format`, `unnecessary_cast`, `clone_on_copy`,
+# `filter_next`). Pinned by name for the reason the three above are: `clippy::all` carries the group
+# today, so the entry changes no diagnostic — it changes what a regrouping of `clippy::all`, or a
+# member downgrading that one entry, can quietly take away. Its reach in the tree is a single site:
+# the `too_many_arguments` allow on the eight-argument raw-row fixture in
+# crates/transformer/tests/transform.rs, scoped and reasoned. Two of this group's lints read their limits
+# from `clippy.toml` rather than from here, so raising `too-many-arguments-threshold` or
+# `type-complexity-threshold` would silence them with this deny still in place; walrus states
+# neither. Unlike suspicious and style, no lint named below belongs to this group — and
+# `priority = -1` is required regardless, because `clippy::lint_groups_priority` measures a group
+# against every named lint in the table, not only the ones it carries, and all of them sit at the
+# default 0. crates/common/tests/workspace_lints_inherited.rs notices if any of that drifts.
+complexity = { level = "deny", priority = -1 }
+# `clippy::perf` is the fifth and last group `clippy::all` carries, and its subject is neither
+# wrongness nor spelling: code that is correct, idiomatically spelled, as short as it goes — and
+# still asks the machine for work nobody needs. `single_char_pattern`, `unnecessary_to_owned`,
+# `manual_memcpy`, `slow_vector_initialization`, `large_enum_variant`, `result_large_err`. Pinned
+# by name for the reason the four above are: the entry changes no diagnostic today, only what a
+# regrouping of `clippy::all` — or a member downgrading that one entry — can quietly take away.
+# Its reach in the tree is the widest of the five: four scoped allows, one per copy of the
+# `figment::Jail` `in_jail` test helper, whose `Result<(), figment::Error>` return figment sizes
+# rather than walrus. Four of its lints read their limits from `clippy.toml` instead of from here,
+# so *raising* one silences the lint with this deny still in place: walrus lowers
+# `enum-variant-size-threshold` to 64 — under a third of clippy's default — and leaves
+# `large-error-threshold`, `too-large-for-stack` and `array-size-threshold` unstated because a
+# threshold move is a separate, noisier decision. No lint named below belongs to
+# this group: its nearest neighbours here are pedantic or nursery (`large_types_passed_by_value`,
+# `large_stack_arrays`, `large_futures`, `large_stack_frames`, `redundant_clone`), and
+# `format_push_string` / `rc_buffer` are restriction. So `priority = -1` is required here for
+# complexity's reason rather than style's — `clippy::lint_groups_priority` measures a group against
+# every named lint in the table, not only the ones it carries, and all of them sit at the default 0.
+# crates/common/tests/workspace_lints_inherited.rs notices if any of that drifts.
+perf = { level = "deny", priority = -1 }
+# `clippy::cargo` is the sixth group and the first `clippy::all` does not carry — also the first
+# whose subject is not the source at all but the manifest this table lives in:
+# `cargo_common_metadata`, `multiple_crate_versions`, `wildcard_dependencies`,
+# `negative_feature_names`, `redundant_feature_names`. The rule asking for it scopes itself to crates
+# bound for a registry and offers `cargo = "allow"` to everyone else, which the `publish = false`
+# above makes walrus. Deny it anyway: three of the five police manifest hygiene a deployment artifact
+# owes exactly as much as a package does. A `*` requirement accepts the next breaking major the day
+# the lock file is regenerated, and a feature named `no-duckdb` or `with-sqlx` reads backwards in any
+# manifest. All three have zero sites — every third-party pin is explicit (arrow, parquet and duckdb
+# exact), the three internal edges are paths rather than version requirements, and the features are
+# `sqlx`, `integration`, `conformance`, `it` — so this entry is the only thing that would notice a
+# fourth spelling arrive. The other two members are owned elsewhere, and this pair of lines says
+# where:
+#   * `cargo_common_metadata` wants the description / repository / keywords / categories a published
+#     crate owes its readers, and skips every package that declares itself unpublishable — all seven of
+#     them — so it is inert by construction. The interlock runs the other way: the day a member drops
+#     that key, this deny is what demands those fields in the one place they would matter.
+#     crates/common/tests/publish_policy.rs guards the key itself.
+#   * `multiple_crate_versions` is the opposite case, and the widest live reach of any lint in this
+#     table: duplicated crate names fill the lock file (ahash, bitflags, getrandom, hashbrown, rand,
+#     rustix, syn, thiserror, windows-sys, …), every pair created by a transitive resolution rather
+#     than by a walrus pin. deny.toml's `[bans] multiple-versions` already owns that question and
+#     deliberately holds it at "warn" until the tree is de-duplicated; the allow below keeps
+#     the decision in the one file that can act on it — with a `skip` list and a per-crate reason —
+#     rather than restating it here, where the two spellings could only drift apart.
+# `priority = -1` is required for the reason the five groups above give, and for one more: the allow
+# on the next line sits at the default 0 like every named entry, so the group must sit under it or
+# `clippy::lint_groups_priority` reports the collision — and the allow itself would be overridden.
+# crates/common/tests/workspace_lints_inherited.rs notices if either line drifts.
+cargo = { level = "deny", priority = -1 }
+multiple_crate_versions = "allow"
+# Ordered sequences stay contiguous. `linkedlist` is pedantic (outside `clippy::all`), so this
+# named deny needs no group-priority adjustment.
+linkedlist = "deny"
+# `redundant_closure_for_method_calls` is pedantic (outside `clippy::all`), so no `priority`
+# juggling is needed. Prefer the direct method item over a non-capturing forwarding adapter.
+redundant_closure_for_method_calls = "deny"
+match_wildcard_for_single_variants = "deny"
+# The five entries below finish the selective pick from `clippy::pedantic`, and the shape of that
+# pick is itself the policy: the group is enabled one lint at a time, never as
+# `pedantic = { level = "deny", priority = -1 }` with a column of re-allows under it. Unlike the six
+# groups above, `pedantic` is not carried by `clippy::all`, so a group entry here would be a
+# behaviour change rather than a pin — and enough of its members are wrong for this tree that each
+# re-allow would read as a retreat rather than as a decision. `missing_panics_doc` cannot see five of
+# the eight production panic sites: they are `tokio::time::interval`'s zero-period panic, raised
+# inside tokio, so its scan of the caller's own body finds nothing to document.
+# `module_name_repetitions` describes `error::TransformerError` and every sibling that names its own
+# module — the naming that makes an error type legible at its use site in another crate.
+# `too_many_lines` prices a `pgoutput` decoder arm like a getter. The inverse holds too, which is
+# what makes this a selection rather than a subset: two lints the usual pedantic advice turns *off*
+# are denied further down on their own merits (`must_use_candidate`, `missing_errors_doc`). All five
+# are pedantic, outside `clippy::all`, so none needs a `priority`. The two members of the same
+# recommended set that stay out — `doc_markdown`, which is really a curated `doc-valid-idents`
+# allow-list, and `unused_self`, which `avoid-breaking-exported-api` narrows to the two binary
+# crates — are intentionally left at their defaults.
+#
+# `unnested_or_patterns` had four sites: three copies of `Some("yaml") | Some("yml")` in the config
+# config loaders, where repeating the constructor hid that the choice is between two extensions and not two
+# shapes, plus the widening table in crates/transformer/src/ddl.rs. The tree's other or-patterns alternate
+# *distinct* variants of one enum, or bare char/OID ranges, which is the shape this lint leaves alone.
+unnested_or_patterns = "deny"
+# A leading underscore is a promise that a binding goes unread, so reading one makes the name a lie.
+# Zero sites: every `_`-prefixed binding here is an RAII guard (`_g`, `_guard`, `_permit`), a
+# discarded `write!` result, a compile-time assertion, or an ignored tuple slot or parameter.
+used_underscore_binding = "deny"
+# `x = x + s` reallocates where `x += s` appends in place, and reads as arithmetic besides. Zero
+# sites: every `a + b` in the tree is integer, `Instant`/`Duration` or float.
+string_add_assign = "deny"
+# A block whose tail expression yields `()` must say so with a semicolon, so that giving that call a
+# return value later is a compile error rather than a silent change of meaning. Its whole reach was
+# eight sites: the seven wrapped `tracing::trace!` arms of `consume::trace_message`, braced blocks
+# only because the macro call does not fit on the arm's own line, plus the `append_value` arm of
+# `push_geometric` in crates/pg-to-arrow/src/batch.rs. The lint sees only *multi-line* blocks whose
+# tail is neither `;`- nor `}`-terminated, so a one-line arm body is out of its reach by construction.
+semicolon_if_nothing_returned = "deny"
+# Glob imports hide where a name came from and let an upstream addition shadow a local one. Clippy
+# exempts the two spellings walrus leans on — `use super::*` inside a `#[cfg(test)]` module, 64 of
+# them, and `use proptest::prelude::*` — so the only site is the `pg_to_arrow::oids` forwarding shim,
+# which carries a scoped allow with a reason. Those exemptions are clippy's
+# `warn-on-all-wildcard-imports` default rather than anything stated here, so `clippy.toml` must keep
+# leaving that key unset: `true` would put all 65 of those imports in scope of this deny without the
+# manifest moving. crates/common/tests/workspace_lints_inherited.rs notices either way.
+wildcard_imports = "deny"
+# `manual_let_else` is pedantic (outside `clippy::all`), so no priority juggling is needed.
+manual_let_else = "deny"
+# This lint is pedantic (outside `clippy::all`), so no priority juggling is needed.
+match_bool = "deny"
+# Pure public computations must warn when their returned value is discarded. This pedantic lint is
+# outside `clippy::all`, so it needs no group priority adjustment.
+must_use_candidate = "deny"
+# A consuming builder's `-> Self` is worthless if dropped. This pedantic lint is outside
+# `clippy::all`, so it needs no group priority adjustment.
+return_self_not_must_use = "deny"
+# Named explicitly so the rule survives a future regrouping of `clippy::all`.
+from_over_into = "deny"
+# `ptr_arg` already arrives via `all = "deny"`; pin it explicitly so the borrowed-argument family is
+# documented together. `ref_option` is pedantic (outside `all`), so no priority juggling is needed.
+ptr_arg = "deny"
+ref_option = "deny"
+# `assigning_clones` is pedantic (outside `all`), so no priority juggling is needed.
+assigning_clones = "deny"
+# `push_str(&format!(..))` allocates a temporary just to copy it into an existing buffer. This is a
+# restriction lint (outside `all`), so no priority juggling is needed.
+format_push_string = "deny"
+# Pedantic: keep small `Copy` values passed by value once the rustc lint above finds them.
+trivially_copy_pass_by_ref = "deny"
+# No `unwrap`/`expect` in production. Both are `clippy::restriction` lints
+# (not in `all`), so no `priority` juggling is needed. `clippy.toml` re-allows them under `#[cfg(test)]`
+# and integration `tests/`; benches (`harness = false`) and the e2e harness lib carry a file-level allow.
+unwrap_used = "deny"
+expect_used = "deny"
+# Diagnostics go through `tracing`, never a raw stream. `println!`/`eprintln!` carry no level, no
+# target and no structured fields, so nothing downstream can filter, route or key on them — the
+# convention `crates/common/src/telemetry.rs` documents, made a build failure here. Both are
+# `clippy::restriction` lints outside `clippy::all`, so no `priority` juggling is needed. The only
+# production carve-out is each binary's `main`, which reports a config or subscriber-init failure on
+# stderr in the window before a subscriber exists; every carve-out is a scoped allow with a reason.
+print_stdout = "deny"
+print_stderr = "deny"
+# `dbg!` is that same mistake in a third spelling, and the one the pair above cannot see: it
+# expands to `eprintln!` inside std, but clippy attributes a macro to its outermost call in
+# first-party code, so `print_stderr` is handed `dbg!` and stays quiet — which is why clippy ships
+# a separate lint for it at all. `clippy::restriction` like that pair, outside `clippy::all`, so
+# only this named entry reaches it; unlike that pair it needs no carve-out anywhere, because a
+# `dbg!` in a committed test is the same debugging leftover as one in a binary. Zero sites today,
+# so crates/common/tests/workspace_lints_inherited.rs is what notices if the entry is dropped — as
+# it does for the key that would hollow it out from the other side: `clippy.toml`'s
+# `allow-dbg-in-tests`, left unstated there for the reason the perf thresholds are.
+dbg_macro = "deny"
+# This nursery lint is outside `clippy::all`, so no `priority` juggling is needed. It rejects
+# mutable references that are only read, keeping mutability contracts honest.
+needless_pass_by_ref_mut = "deny"
+# Pure stable-const functions are compile-time callable by policy. This nursery lint is
+# outside `clippy::all`, so no group-vs-lint `priority` adjustment is needed.
+missing_const_for_fn = "deny"
+# Globals use std: `OnceLock`/`LazyLock`/atomics, never hand-rolled lazy statics. This pedantic lint
+# is outside `clippy::all`, so it needs no `priority` today. Revisit the named entry if the whole
+# `pedantic` group is enabled at this level.
+non_std_lazy_statics = "deny"
+# A discarded `Result`/`#[must_use]` value must be an explicit, argued decision. Test targets
+# re-allow this through their existing unwrap/expect carve-outs.
+let_underscore_must_use = "deny"
+# Lossy integer casts are explicit policy. These pedantic lints are outside `all`; a
+# surviving bit-pattern reinterpretation needs a scoped allow with a reason. `cast_precision_loss`
+# deliberately stays allowed: metrics gauges/ratios and sqlx float8 binds require f64.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+cast_lossless = "deny"
+# Float equality is never exact by accident. Test comparisons use documented tolerance
+# helpers; special values use `is_nan`/`is_infinite` predicates instead of lint suppression.
+float_cmp = "deny"
+# Forced inlining must cite a measured win. This pedantic lint is outside `clippy::all`,
+# so it needs no priority. The escape hatch is a site-local Clippy allow with a reason citing its
+# `docs/benchmarks.md` delta.
+inline_always = "deny"
+# Belt-and-braces if a future crate deliberately stops inheriting the rustc forbid above: every
+# unsafe block must carry a `// SAFETY:` comment. This is a restriction lint outside `clippy::all`,
+# so no group-vs-lint priority is needed.
+undocumented_unsafe_blocks = "deny"
+# Keep each unsafe block to one auditable invariant, so a single `// SAFETY:` comment never has to
+# justify two operations. This is another restriction lint outside `clippy::all`, so it needs no
+# group-vs-lint priority. Neither of this pair has a site to go red while the forbid above holds, so
+# crates/common/tests/workspace_lints_inherited.rs is what notices if either entry is dropped.
+multiple_unsafe_ops_per_block = "deny"
+# The caller-facing half of that family: an `unsafe fn` must publish, in a `# Safety` section, the
+# obligations its callers take on. This one is a style lint, so `all = "deny"` above carries it
+# already; name it anyway — as `ptr_arg` is named — so it survives a regrouping of `clippy::all`.
+missing_safety_doc = "deny"
+# Its inverse, and the only member of this family with live reach while the rustc forbid above
+# holds: any `# Safety` heading this tree could grow would sit on a *safe* item, promising callers
+# an obligation they do not owe. Pedantic, outside `clippy::all`, so it needs no priority either.
+unnecessary_safety_doc = "deny"
+# A suppression must say why. This restriction lint is outside `clippy::all`, so no priority is needed.
+allow_attributes_without_reason = "deny"
+# Promoting exactly this pedantic lint keeps every fallible public API's contract explicit.
+missing_errors_doc = "deny"
+# The no-panic policy: a recoverable failure — a bad config value, a short wire frame, a malformed
+# range literal — leaves as a typed `Err` that `main` maps onto a `common::ExitCode`, never as an
+# abort. All five are `restriction`/`pedantic` lints outside every group denied above, so only these
+# named entries reach them. What notices if one is dropped is
+# crates/common/tests/workspace_lints_inherited.rs; what notices a scoped in-source suppression past
+# any of them is crates/common/tests/no_panic_suppression.rs.
+panic = "deny"              # a service returns a classified error instead of aborting the pod
+todo = "deny"               # unfinished code must not reach main
+unimplemented = "deny"      # incomplete production paths are compile failures
+unreachable = "deny"        # exhaustive matches turn impossible states into compile-time checks
+panic_in_result_fn = "deny" # a function that can return failure must not panic instead
+# Lock scope is a correctness property on the decode hot path (`own-mutex-interior`):
+# matching directly on `self.x.lock().remove(..)` holds the guard for the whole body. These nursery
+# lints are outside `clippy::all`, so no priority is needed.
+significant_drop_in_scrutinee = "deny"
+significant_drop_tightening = "deny"
+# Async guards and RefCell borrows must never remain live across a suspension point.
+# The first two know their guard types; `await_holding_invalid_type` reads its list from
+# `clippy.toml`'s `await-holding-invalid-types`, which names the lock-shaped guards the other two
+# miss (today: `tokio::sync::watch::Ref`).
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+await_holding_invalid_type = "deny"
+# Non-Send futures cannot be spawned onto Tokio's multi-thread scheduler. The transformer is the
+# documented exception: DuckDB-backed workers are intentionally driven on a LocalSet.
+future_not_send = "deny"
+# Shared-ownership bumps must say they are bumps (`own-arc-shared`). Like `unwrap_used` /
+# `expect_used`, this is one `clippy::restriction` lint rather than the whole group; it is outside
+# `clippy::all`, so no `priority` is needed.
+clone_on_ref_ptr = "deny"
+# No refcounted pointer to a growable buffer (`own-rc-single-thread`): `Rc<Vec<T>>` /
+# `Arc<String>` add an indirection where `Rc<[T]>` / `Arc<str>` are one. Like `unwrap_used` and
+# `expect_used`, this is one `clippy::restriction` lint outside `clippy::all`, so no priority.
+rc_buffer = "deny"
+# Large-value gates (`own-move-large`). All four measured 0 sites across the 51-lint
+# pedantic+nursery sweep, so they only stop regressions on the per-WAL-message move path. They are
+# outside `clippy::all`, so no `priority` field is needed.
+large_types_passed_by_value = "deny"
+large_stack_arrays = "deny"
+large_stack_frames = "deny"
+large_futures = "deny"
+# `redundant_clone` is nursery and `implicit_clone` is pedantic; neither is in `all`, so no priority juggling is needed.
+redundant_clone = "deny"
+implicit_clone = "deny"
+# Nursery (outside `clippy::all`, so no `priority` juggling): flags a lifetime that must exist but
+# need not be named. Its coarser sibling `needless_lifetimes` already arrives through `all`.
+elidable_lifetime_names = "deny"
+# Keep generic constraints singular: no repeated bound lists, duplicate traits, or split
+# declaration/where-clause ownership. These lints are outside `clippy::all`, so need no priority.
+type_repetition_in_bounds = "deny"
+trait_duplication_in_bounds = "deny"
+multiple_bound_locations = "deny"
+# Module layout is one style, not two. `crates/extractor/src/pgoutput/` is the tree's only
+# multi-file module directory, and it carries a `mod.rs`. This restriction lint (outside
+# `clippy::all`, so no priority juggling) turns a future `foo.rs` + `foo/` pair into a build
+# failure instead of a second convention. It has zero sites today, so nothing but
+# crates/common/tests/workspace_lints_inherited.rs notices if the entry is dropped. Its inverse,
+# `mod_module_files`, must stay absent: it bans the `mod.rs` walrus standardised on, and that
+# file's path is pinned by crates/common/tests/const_invariant_compile_fail.rs.
+self_named_module_files = "deny"
+# `clippy::nursery` is the second group this table enables one lint at a time, and — as with
+# `pedantic` above — the missing group entry is the policy rather than an oversight. Two things rule
+# the wholesale spelling out. It is not carried by `clippy::all`, so
+# `nursery = { level = "deny", priority = -1 }` would be a behaviour change rather than a pin; and a
+# nursery lint is unfinished by definition, so the column of re-allows underneath it would have to be
+# re-argued on every toolchain bump, as heuristics tighten and names graduate out into `style`,
+# `pedantic` or `perf`. Ten members are already denied above, each argued where it sits rather than
+# swept in by a group: `significant_drop_in_scrutinee` and `significant_drop_tightening` (lock
+# scope), `needless_pass_by_ref_mut`, `missing_const_for_fn`, `future_not_send`, `redundant_clone`,
+# `elidable_lifetime_names`, `large_stack_frames`,
+# `type_repetition_in_bounds` and `trait_duplication_in_bounds`.
+#
+# The two entries below finish that pick against the recommended starter set, and the fifth member
+# of it stays out: `use_self` is the only one of the five that would not be a pin. It has live sites
+# throughout the tree — `Lsn::ZERO` names its own type twice in crates/common/src/lsn.rs, and every
+# hand-written `Default` repeats its struct name — so enabling it is a tree-wide rewrite rather than
+# a line added here, and belongs to the change that carries those edits with it.
+#
+# `or_fun_call` is the eager-fallback gate that pick was missing: `unwrap_or(expensive())` pays for
+# the fallback on the path that does not take it, where `unwrap_or_else` / `or_default` pay only on
+# the path that does. Zero sites — every `unwrap_or`, `ok_or`, `or_insert` and `map_or` argument in
+# the tree is a literal, a `&'static str`, or a tuple-struct/enum-variant constructor, all of which
+# clippy's eagerness analysis rates cheap enough to leave eager — so, as with `dbg_macro`, this entry
+# only stops the first real one and crates/common/tests/workspace_lints_inherited.rs is what notices
+# if it is dropped. Its complement needs no pin of its own and pushes the other way:
+# `unnecessary_lazy_evaluations` is a complexity lint, so the group entry above already carries it,
+# and a fallback that lint would call cheap has to stay eager here.
+or_fun_call = "deny"
+# `redundant_else` is the one member of that recommended set which is pedantic rather than nursery,
+# so it belongs to the selective pedantic pick above as much as to this review; it is recorded here
+# because the review is what found it. An `else` block whose sibling `if` always returns, breaks,
+# continues or panics is a level of indentation with nothing behind it, and unindenting the tail is
+# what makes the early exit read as one. Zero sites: every `else` in the tree pairs with a
+# then-branch that produces a value. Outside `clippy::all`, so no priority juggling is needed.
+redundant_else = "deny"
+
+[workspace.dependencies]
+# Internal crates, centralised for the reason the third-party pins below are: `common` was spelled
+# out in five member manifests, in two different relative forms (`../common` from a `crates/*`
+# member, `../../crates/common` from `tests/e2e`), so moving a crate meant finding all of them. A
+# path here is resolved against the workspace root, so each internal crate has exactly one spelling
+# and each member states only the edge — plus any feature it needs on top. `transformer` and `e2e` are
+# deliberately absent: nothing depends on them, so they have no edge to centralise. The e2e source-
+# event test depends on `extractor` so it invokes the production request API rather than duplicating it.
+common = { path = "crates/common" }
+walrus-config = { path = "crates/walrus-config" }
+control = { path = "crates/control" }
+extractor = { path = "crates/extractor" }
+pg-to-arrow = { path = "crates/pg-to-arrow" }
+
+# Shared version pins live here so every workspace member resolves the same dependency versions.
+thiserror = "2"
+serde = "1"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Local-only async diagnostics. Kept optional in `common`; the two binary crates expose the
+# `tokio-console` feature that activates it and Tokio's matching tracing feature together.
+console-subscriber = "0.5.0"
+# Local-only heap diagnostics. Each binary opts into this allocator with its own `dhat-heap`
+# feature, so the shipped/default allocator and runtime cost stay unchanged.
+dhat = "0.3.3"
+figment = "0.10"
+humantime-serde = "1"
+jiff = "0.2"
+bytes = "1"
+futures-util = "0.3"
+tokio = "1"
+sqlx = "0.8"
+anyhow = "1"
+hex = "0.4"
+sha2 = "0.10"
+# Non-poisoning mutex: `.lock()` returns the guard directly, so there is no `unwrap`/`expect`
+# on the lock — the clean fit for the `clippy::unwrap_used`/`expect_used` deny. Already in the
+# lock file (transitive), MIT/Apache: a zero-cost direct-dep promotion.
+parking_lot = "0.12"
+# Pinned to EXACT versions: DuckDB reads a native `UUID` only when arrow-rs annotates the
+# FixedSizeBinary(16) with the `arrow.uuid` canonical extension → Parquet UUID logical type. That
+# annotation is behaviour a minor bump could change, so the (CI-guarded) uuid mapping pins arrow +
+# parquet, and duckdb is pinned alongside for a stable read-back. §2.4 uuid.
+arrow = "=54.3.1"
+parquet = "=54.3.1"
+# `1.10504.0` encodes DuckDB engine v1.5.4 (duckdb-rs scheme since v1.5.0: minor=(N/100)%100,
+# patch=N%100). Keep this exact pin aligned with the Arrow/Parquet conformance suite before
+# upgrading because DuckDB's inferred logical types are part of the wire contract.
+duckdb = "=1.10504.0"
+uuid = "1"
+tempfile = "3"
+# Extractor binary: health endpoints, cancellation, object-store canary.
+axum = "0.7"
+tokio-util = "0.7"
+object_store = "0.11"
+# Replication-capable source connection + catalog preflight; START_REPLICATION.
+tokio-postgres = "0.7"
+# Hand-rolled replication wire protocol: big-endian LSNs / clocks in CopyBoth frames.
+byteorder = "1"
+# Observability: a metrics facade + a Prometheus recorder. default-features off — we render
+# the text exposition through the existing axum health server, not the crate's own hyper listener.
+metrics = "0.23"
+metrics-exporter-prometheus = { version = "0.15", default-features = false }
+# Micro-benchmark harness. default-features off drops plotters/rayon/html_reports — we want
+# the stdout stats, not the HTML plots, and a lean dev-dep tree (this phase is about *cutting* build
+# cost). `cargo_bench_support` is what makes `harness = false` + `criterion_main!` run under `cargo bench`.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Property-based test harness (dev-only, `common`). `Lsn`'s padded rendering carries two algebraic
+# invariants that hand-picked examples can only sample: it round-trips through `FromStr`, and its
+# *text* order is its *numeric* order — the contract the `(commit_lsn, lsn)` pipeline sorts on.
+# default-features off drops `fork`/`timeout` (a subprocess-per-case harness walrus never runs) and
+# the `bit-set` shrinker, keeping the dev-dep tree lean exactly as the criterion pin above does.
+proptest = { version = "1", default-features = false, features = ["std"] }
+# Reviewable snapshots for the transformer's large deterministic SQL renderings. String snapshots
+# need no serialization features, and this remains a transformer-only dev dependency.
+insta = { version = "1", default-features = false }
+
+# Release-artifact tuning. Thin LTO inlines across crate boundaries — a real win on the
+# dispatch-heavy hot paths (Arrow `append_value` downcasts, the decoder match arms) for ~10-20 % extra
+# link time, measured on the benchmark suite. `codegen-units` is left at the default: cgu=1 buys
+# only a few percent more for ~2× the release build, a poor trade while CI and container build time
+# remain significant. `crates/common/tests/build_profile.rs` guards that choice.
+# `panic` and `strip` are the two remaining knobs of that family, and both keep their defaults for
+# behavioural rather than build-cost reasons: unwinding is what lets crates/extractor/src/reload.rs
+# classify a panicking reload exporter instead of taking the whole extractor down with it, and the symbol
+# table is what names the frames in a profile of the release — and, by inheritance, `bench` — binary.
+# `docs/benchmarks.md` records the profiling method; the same build-profile guard requires the
+# symbolized profiling exception to inherit release without changing code generation.
+[profile.release]
+lto = "thin"
+
+# Symbolized, otherwise release-equivalent binaries for Samply, DHAT and tokio-console runs. The
+# ordinary release and bench profiles remain the performance baseline; this profile is diagnostic
+# and intentionally produces larger local artifacts under target/profiling.
+[profile.profiling]
+inherits = "release"
+debug = true

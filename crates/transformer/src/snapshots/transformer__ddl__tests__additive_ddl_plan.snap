@@ -1,0 +1,6 @@
+---
+source: crates/transformer/src/ddl_test.rs
+expression: sql
+---
+ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS note VARCHAR; ALTER TABLE "orders_raw" ADD COLUMN IF NOT EXISTS note VARCHAR;ALTER TABLE "orders" RENAME COLUMN status TO state; ALTER TABLE "orders_raw" RENAME COLUMN status TO state;ALTER TABLE "orders" ALTER COLUMN id TYPE BIGINT; ALTER TABLE "orders_raw" ALTER COLUMN id TYPE BIGINT;ALTER TABLE "orders" RENAME TO "archived_orders"; ALTER TABLE "orders_raw" RENAME TO "archived_orders_raw"; DROP VIEW IF EXISTS "orders_current";COMMENT ON TABLE "archived_orders" IS 'customer''s archived orders';CREATE OR REPLACE VIEW "archived_orders_current" AS
+SELECT * EXCLUDE (_applied_commit_lsn, _applied_lsn) FROM "archived_orders";

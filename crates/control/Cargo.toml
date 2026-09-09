@@ -1,0 +1,38 @@
+[package]
+name = "control"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true # internal component; the workspace bar keeps it off every registry
+
+[lints]
+workspace = true
+
+[features]
+# Compose-gated integration tests (require a live control Postgres). Off by default so the
+# DB-free baseline `cargo test --workspace` skips them; the CI integration job turns it on.
+integration = []
+
+[dependencies]
+common = { workspace = true, features = ["sqlx"] }
+thiserror = { workspace = true }
+sqlx = { workspace = true, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+    "json",
+    "uuid",
+] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Dev-only: the schema_registry round-trip test builds real TypeDescriptors from pg-to-arrow. Legal —
+# pg-to-arrow depends on `common` only, so there is NO cycle; the production DAG (control → common)
+# is unchanged.
+pg-to-arrow = { workspace = true }

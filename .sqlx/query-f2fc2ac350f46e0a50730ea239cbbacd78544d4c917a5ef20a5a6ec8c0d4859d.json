@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.walrus_transformer_checkpoint\n    (epoch, source_schema, source_table, raw_appended_lsn, transformed_lsn)\nVALUES ($1, $2, $3, $4, $4)\nON CONFLICT (epoch, source_schema, source_table) DO UPDATE\n    SET transformed_lsn =\n            GREATEST(public.walrus_transformer_checkpoint.transformed_lsn, EXCLUDED.transformed_lsn),\n        updated_at = now()\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "pg_lsn",
+            "kind": "Simple"
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f2fc2ac350f46e0a50730ea239cbbacd78544d4c917a5ef20a5a6ec8c0d4859d"
+}

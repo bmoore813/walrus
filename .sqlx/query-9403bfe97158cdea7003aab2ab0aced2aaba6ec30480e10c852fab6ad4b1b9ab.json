@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO public.walrus_table_reload\n    (epoch, source_schema, source_table, flavor,\n     source_request_id, parent_request_id, request_scope)\nVALUES ($1, $2, $3, $4, $5, $6, $7)\nON CONFLICT (epoch, source_request_id, source_schema, source_table)\n  WHERE source_request_id IS NOT NULL\nDO UPDATE\nSET source_request_id = EXCLUDED.source_request_id\nWHERE public.walrus_table_reload.parent_request_id IS NOT DISTINCT FROM EXCLUDED.parent_request_id\n  AND public.walrus_table_reload.request_scope = EXCLUDED.request_scope\n  AND public.walrus_table_reload.flavor = EXCLUDED.flavor\nRETURNING reload_id\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reload_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9403bfe97158cdea7003aab2ab0aced2aaba6ec30480e10c852fab6ad4b1b9ab"
+}
